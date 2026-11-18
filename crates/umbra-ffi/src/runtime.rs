@@ -3,10 +3,11 @@
 //! node stays a plain state machine, thus this file holds the clock, the
 //! random source, and the socket, and no protocol rule.
 
+use crate::clock::unix_now;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use tokio::sync::mpsc;
@@ -40,14 +41,6 @@ pub struct OsRng;
 /// other key (`IMP-127`). A locked client runs no network, and its values
 /// come from the platform source alone until the next unlock.
 static HARDEN: std::sync::Mutex<Option<Secret<32>>> = std::sync::Mutex::new(None);
-
-/// A copy of `secret` that the bytes go straight into. A copy through an
-/// array value would leave the bytes in a stack slot that no wipe reaches.
-pub(crate) fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
-    let mut copy = Secret::zeroed();
-    copy.expose_mut().copy_from_slice(secret.expose());
-    copy
-}
 
 /// The context of each value of this process under the hardening.
 const HARDEN_CONTEXT: &[u8] = umbra_crypto::labels::CLIENT_RNG;
@@ -976,7 +969,9 @@ static CLOCK_SEEN: std::sync::Mutex<Option<(i64, bool)>> = std::sync::Mutex::new
 fn clock_offset(now: u64) -> (i64, bool) {
     let (anchor, then) = CLOCK_ANCHOR.get_or_init(|| (AwakeClock::now(), now));
     let (mono, counts_sleep) = anchor.elapsed();
-    let ahead = i128::from(now) - i128::from(*then) - i128::from(mono);
+    let ahead = i128::from(now)
+        .saturating_sub(i128::from(*then))
+        .saturating_sub(i128::from(mono));
     let bound = if ahead < 0 { i64::MIN } else { i64::MAX };
     (i64::try_from(ahead).unwrap_or(bound), counts_sleep)
 }
@@ -1058,10 +1053,12 @@ fn cover_delay(rng: &mut OsRng) -> Duration {
     COVER_MEAN.mul_f64(-unit.ln())
 }
 
-pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
+/// The instant that comes `wait` after now.
+pub fn deadline_after(wait: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+
+    // A wait past the range of the clock ends now, thus no wait is endless.
+    now.checked_add(wait).unwrap_or(now)
 }
 
 /// The session that one run parked, for the next run of this process
@@ -1246,7 +1243,7 @@ pub async fn run_client(
 
     // WIR-547: the time at which a resume with no capsule of the relay
     // counts as failed.
-    let resume_end = tokio::time::Instant::now() + RESUME_CONFIRM_WAIT;
+    let resume_end = deadline_after(RESUME_CONFIRM_WAIT);
 
     // WIR-539, WIR-540: the cause of the end of a run that pauses its
     // session, and the time at which it waits for the relay no more.
@@ -1271,7 +1268,7 @@ pub async fn run_client(
     let mut ended_invites: BTreeSet<u64> = BTreeSet::new();
 
     let mut is_foreground = true;
-    let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
+    let mut next_slot = deadline_after(cover_delay(&mut rng));
 
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
     // ran out, and the cover clock stays memoryless.
@@ -1403,7 +1400,7 @@ pub async fn run_client(
                         break 'run Ended::Stopped;
                     }
 
-                    let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
+                    let end = deadline_after(Duration::from_secs(PAUSE_WAIT));
                     pausing = Some((Ended::Stopped, end));
                     Vec::new()
                 }
@@ -1425,8 +1422,7 @@ pub async fn run_client(
                 }
                 Some(Command::Wake) => {
                     wake_end = Some(
-                        tokio::time::Instant::now()
-                            + Duration::from_secs(umbra_core::notify::WAKE_SESSION_MAX),
+                        deadline_after(Duration::from_secs(umbra_core::notify::WAKE_SESSION_MAX)),
                     );
 
                     // NET-099: a push-wake session builds no spare circuit.
@@ -1449,14 +1445,14 @@ pub async fn run_client(
                     break 'run Ended::WakeDone;
                 }
 
-                let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
+                let end = deadline_after(Duration::from_secs(PAUSE_WAIT));
                 pausing = Some((Ended::WakeDone, end));
                 Vec::new()
             }
             // The clock is memoryless, and it fires whether or not a cell
             // waits (`NET-049`). A fault of one slot ends no run.
             () = tokio::time::sleep_until(next_slot), if pausing.is_none() => {
-                next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
+                next_slot = deadline_after(cover_delay(&mut rng));
                 let now = unix_now();
 
                 // NET-071, NET-065: a record of the user goes again in a
@@ -1513,7 +1509,7 @@ pub async fn run_client(
                     if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
                         node.on_cover_slot(is_foreground, given, offered, now, &mut rng)
                     {
-                        carried = Some((slot, tokio::time::Instant::now() + CARRIED_WAIT));
+                        carried = Some((slot, deadline_after(CARRIED_WAIT)));
                     }
                     for contact in node.take_gaps() {
                         let _ = updates.send(Update::DeliveryGap(contact));
@@ -1563,8 +1559,7 @@ pub async fn run_client(
                 // NET-176: a fault of one rotation ends no run, and the
                 // next check tries again.
                 if node.is_ready() && tokio::time::Instant::now() >= next_rotation_check {
-                    next_rotation_check =
-                        tokio::time::Instant::now() + Duration::from_secs(60);
+                    next_rotation_check = deadline_after(Duration::from_secs(60));
                     events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
                     let _ = updates.send(Update::Tick);
                 }

@@ -198,8 +198,8 @@ impl LinkFaults {
                 continue;
             };
 
-            let at_rate = u32::from(count.loops_lost) * 100
-                >= u32::from(count.loops_sent) * u32::from(LOOP_FAULT_RATE);
+            let at_rate = u32::from(count.loops_lost).saturating_mul(100)
+                >= u32::from(count.loops_sent).saturating_mul(u32::from(LOOP_FAULT_RATE));
             if count.loops_sent >= LOOP_FAULT_MIN && at_rate {
                 self.report(key.0, &key.1, count.loops_sent, count.loops_lost, now);
             }

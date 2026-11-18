@@ -487,7 +487,10 @@ fun RequestsPrompt(push: (Screen) -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             FaIcon("user-plus", size = 18.dp, tint = Palette.Text)
             Spacer(Modifier.width(14.dp))
-            Text(pluralStringResource(R.plurals.discovery_contact_requests_count, count, count))
+            Text(
+                pluralStringResource(R.plurals.discovery_contact_requests_count, count, count),
+                Modifier.tagged(TestTags.REQUEST_OPEN),
+            )
         }
     }
 }

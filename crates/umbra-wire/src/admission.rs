@@ -58,7 +58,7 @@ impl<'a> Admission<'a> {
 
     /// The encoded length.
     pub const fn len(&self) -> usize {
-        NONE_LEN + self.body.len()
+        NONE_LEN.saturating_add(self.body.len())
     }
 
     /// Whether the body is empty. Clippy asks for this beside `len`.

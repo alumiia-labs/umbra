@@ -205,7 +205,7 @@ impl State {
             .cipher()?
             .encrypt_inout_detached(&nonce, &self.h, buf.into())
             .map_err(|_| Error::Handshake)?;
-        self.n += 1;
+        self.n = self.n.checked_add(1).ok_or(Error::Handshake)?;
 
         let tag: [u8; TAG_LEN] = tag.into();
         self.mix_hash_ct(buf, &tag);
@@ -230,7 +230,7 @@ impl State {
             .decrypt_inout_detached(&nonce, &self.h, buf.into(), &Tag::from(tag))
             .map_err(|_| Error::Handshake)?;
 
-        self.n += 1;
+        self.n = self.n.checked_add(1).ok_or(Error::Handshake)?;
         self.h = next_h;
         Ok(())
     }

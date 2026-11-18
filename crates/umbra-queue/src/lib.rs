@@ -10,6 +10,7 @@
 //! ARQ, and the receipt hold of a client.
 #![forbid(unsafe_code)]
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 extern crate alloc;
 

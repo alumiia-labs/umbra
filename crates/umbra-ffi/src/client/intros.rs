@@ -79,7 +79,8 @@ fn read_row(value: &[u8]) -> Result<Row, Error> {
     let take16 = |at: usize| -> Result<ConversationId, Error> {
         Ok(ConversationId(
             value
-                .get(at..at + 16)
+                .get(at..)
+                .and_then(|rest| rest.get(..16))
                 .and_then(|b| b.try_into().ok())
                 .ok_or(Error::Integrity)?,
         ))
@@ -88,13 +89,12 @@ fn read_row(value: &[u8]) -> Result<Row, Error> {
     let peer = take16(1)?;
     let third = take16(17)?;
     let name_len = usize::from(*value.get(33).ok_or(Error::Integrity)?);
-    let name = value.get(34..34 + name_len).ok_or(Error::Integrity)?;
-    let at = 34 + name_len;
-    let third_len = usize::from(*value.get(at).ok_or(Error::Integrity)?);
-    let third_name = value
-        .get(at + 1..at + 1 + third_len)
+    let rest = value.get(34..).ok_or(Error::Integrity)?;
+    let (name, rest) = rest.split_at_checked(name_len).ok_or(Error::Integrity)?;
+    let (&third_len, rest) = rest.split_first().ok_or(Error::Integrity)?;
+    let (third_name, link) = rest
+        .split_at_checked(usize::from(third_len))
         .ok_or(Error::Integrity)?;
-    let link = value.get(at + 1 + third_len..).ok_or(Error::Integrity)?;
 
     Ok(Row {
         kind,
@@ -109,7 +109,7 @@ fn read_row(value: &[u8]) -> Result<Row, Error> {
 fn fit(name: &str) -> &str {
     let mut end = name.len().min(NAME_MAX);
     while !name.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
 
     name.get(..end).unwrap_or("")
@@ -123,7 +123,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let mut body = vec![0u8; 5 + share.name.len() + share.body.len()];
+        let mut body = vec![
+            0u8;
+            5usize
+                .saturating_add(share.name.len())
+                .saturating_add(share.body.len())
+        ];
         let used = share.encode(&mut body)?;
         body.truncate(used);
         let mut msg_id = [0u8; 16];

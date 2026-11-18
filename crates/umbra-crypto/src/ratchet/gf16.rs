@@ -24,7 +24,7 @@ pub const fn mul(a: u16, b: u16) -> u16 {
     let mut acc: u32 = 0;
     let mut a = a as u32;
     let mut b = b;
-    let mut i = 0;
+    let mut i: u32 = 0;
 
     while i < 16 {
         // Add a when the low bit of b is set, then shift a up and reduce.
@@ -34,7 +34,7 @@ pub const fn mul(a: u16, b: u16) -> u16 {
         a <<= 1;
         let overflow = 0u32.wrapping_sub((a >> 16) & 1);
         a ^= POLY & overflow;
-        i += 1;
+        i = i.saturating_add(1);
     }
     acc as u16
 }

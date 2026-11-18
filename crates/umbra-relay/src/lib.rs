@@ -13,10 +13,12 @@
 //! the machine for the budgets of a link alone. The binary of this crate
 //! binds the node to the native transport stack.
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 #[cfg(feature = "sockets-test")]
 pub mod busy;
 pub mod circuits;
+pub mod clock;
 #[cfg(feature = "native")]
 pub mod directory_server;
 #[cfg(feature = "native")]

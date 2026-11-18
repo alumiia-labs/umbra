@@ -61,11 +61,11 @@ fn ln(mut x: f64) -> f64 {
     let mut k = 0i32;
     while x >= 2.0 {
         x /= 2.0;
-        k += 1;
+        k = k.saturating_add(1);
     }
     while x < 1.0 {
         x *= 2.0;
-        k -= 1;
+        k = k.saturating_sub(1);
     }
 
     let y = (x - 1.0) / (x + 1.0);
@@ -73,7 +73,7 @@ fn ln(mut x: f64) -> f64 {
     let mut term = y;
     let mut sum = 0.0;
     for i in 0..30u32 {
-        sum += term / f64::from(2 * i + 1);
+        sum += term / f64::from(i.saturating_mul(2).saturating_add(1));
         term *= y2;
     }
 

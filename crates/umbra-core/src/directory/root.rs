@@ -544,11 +544,11 @@ fn correction(root_start: u64, device_clock: u64) -> i64 {
     let signed = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
     let root_end = root_start.saturating_add(CONSENSUS_VALIDITY);
     if device_clock < root_start {
-        signed(root_start) - signed(device_clock)
+        signed(root_start).saturating_sub(signed(device_clock))
     } else if device_clock <= root_end {
         0
     } else {
-        signed(root_end) - signed(device_clock)
+        signed(root_end).saturating_sub(signed(device_clock))
     }
 }
 

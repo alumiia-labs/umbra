@@ -349,7 +349,7 @@ fn next_write<R: CryptoRng + ?Sized>(now: u64, interval: u64, rng: &mut R) -> u6
     let mut draw = [0u8; 8];
     rng.fill_bytes(&mut draw);
     now.saturating_add(interval / 2)
-        .saturating_add(u64::from_be_bytes(draw) % interval.max(1))
+        .saturating_add(u64::from_be_bytes(draw).checked_rem(interval).unwrap_or(0))
 }
 
 fn index_key(table: TableId, row: &RowId) -> Vec<u8> {

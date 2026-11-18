@@ -11,10 +11,12 @@
 //! §14.6.4, and the `bindings` feature adds the UniFFI scaffolding over
 //! both.
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 #[cfg(feature = "runtime")]
 pub mod bridge;
 pub mod client;
+pub mod clock;
 pub mod devlog;
 pub mod draft;
 #[cfg(feature = "runtime")]
@@ -4323,7 +4325,7 @@ mod tests {
         let mut rng = Rng(83);
         let mut client = new_client(&mut rng);
         let peer = ContactId([0x93; 32]);
-        let conversation = client.conversation_for(&peer.0).unwrap();
+        let conversation = add_contact(&mut client, 0x93, &mut rng);
         let now = 1_800_000_000u64;
         let at = |seconds: u64| (now + seconds) * 1_000;
 
@@ -5060,8 +5062,8 @@ mod tests {
 
         let mut rng = Rng(112);
         let mut alice = new_client(&mut rng);
-        let one = alice.conversation_for(&[0x58; 32]).unwrap();
-        let two = alice.conversation_for(&[0x59; 32]).unwrap();
+        let one = add_contact(&mut alice, 0x58, &mut rng);
+        let two = add_contact(&mut alice, 0x59, &mut rng);
         let mut draft = alice.new_draft(one);
         draft.set_text(&units("pass it on")).unwrap();
         let mut message = alice.send_draft(draft, 1_000_000, &mut rng).unwrap();
@@ -6928,7 +6930,18 @@ mod tests {
     fn a_draft_stays_until_its_send_and_its_sync_turns_off() {
         let mut rng = Rng(113);
         let mut client = new_client(&mut rng);
-        let conversation = ConversationId([0x31; 16]);
+        // The stored form holds a salt, thus the draft has a subject in the set.
+        let contact = umbra_core::session::node::ContactId([0x31; 32]);
+        let change = umbra_core::session::node::StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(umbra_core::session::node::shadow_contact_state(
+                &[5; 16],
+            )),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
         assert!(client.draft(conversation).unwrap().is_empty());
         client
             .set_draft(conversation, &units("half a thought"), &mut rng)
@@ -7005,10 +7018,32 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_for_an_unknown_conversation_stores_no_message() {
+        let mut rng = Rng(98);
+        let mut client = new_client(&mut rng);
+        let unknown = ConversationId([8; 16]);
+
+        let mut held = Some(client.new_draft(unknown));
+        held.as_mut()
+            .unwrap()
+            .set_text(&units("to nobody"))
+            .unwrap();
+        assert_eq!(
+            client.send_draft_kept(&mut held, 1_000_000, &mut rng),
+            Err(Error::NotFound)
+        );
+
+        // The refusal keeps the draft and writes no row.
+        assert!(held.is_some());
+        assert!(client.take_outgoing().is_none());
+        assert!(client.messages(unknown).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_failed_message_goes_again_at_the_action_of_the_user() {
         let mut rng = Rng(97);
         let mut client = new_client(&mut rng);
-        let conversation = ConversationId([8; 16]);
+        let conversation = add_contact(&mut client, 8, &mut rng);
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("first")).unwrap();
         let first = client.send_draft(draft, 1_000_000, &mut rng).unwrap();
@@ -7157,7 +7192,7 @@ mod tests {
     fn a_draft_becomes_a_stored_message_and_renders_into_a_sink() {
         let mut rng = Rng(1);
         let mut client = new_client(&mut rng);
-        let conversation = ConversationId([7; 16]);
+        let conversation = add_contact(&mut client, 7, &mut rng);
 
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("hello 👋")).unwrap();
@@ -7475,7 +7510,8 @@ mod tests {
         assert_eq!(String::from_utf16(&view.0).unwrap(), "yes, at four");
 
         // WIR-171: an answer stays inside the conversation of its target.
-        let mut stray = client.new_draft(ConversationId([3; 16]));
+        let other = add_contact(&mut client, 3, &mut rng);
+        let mut stray = client.new_draft(other);
         stray.set_text(&units("wrong place")).unwrap();
         stray.set_reply_to(Some(asked));
         assert_eq!(
@@ -7484,6 +7520,25 @@ mod tests {
         );
         client.audit().unwrap();
         peer.audit().unwrap();
+    }
+
+    /// Gives `client` a contact, and gives the conversation of that contact.
+    fn add_contact(
+        client: &mut Client<MemoryBackend, Element>,
+        id: u8,
+        rng: &mut Rng,
+    ) -> ConversationId {
+        use umbra_core::session::node::{ContactId, StateChange};
+        let contact = ContactId([id; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, rng)
+            .unwrap();
+
+        client.conversation_for(&contact.0).unwrap()
     }
 
     /// A client with one contact, and the conversation of that contact.
@@ -8686,7 +8741,7 @@ mod tests {
     fn a_lock_drops_the_key_and_an_unlock_brings_the_waiting_records_back() {
         let mut rng = Rng(1);
         let mut client = new_client(&mut rng);
-        let conversation = ConversationId([7; 16]);
+        let conversation = add_contact(&mut client, 7, &mut rng);
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("still waiting")).unwrap();
         let waiting = client.send_draft(draft, 1_010_000, &mut rng).unwrap();

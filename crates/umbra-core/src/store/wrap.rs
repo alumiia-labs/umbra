@@ -71,7 +71,7 @@ impl Cost {
     /// milliseconds. The memory stays at the floor, and the passes grow
     /// until one try takes about `TARGET_MS`.
     pub fn calibrate(floor_ms: u64) -> Self {
-        let per_pass = (floor_ms / u64::from(T_FLOOR)).max(1);
+        let per_pass = floor_ms.checked_div(u64::from(T_FLOOR)).unwrap_or(0).max(1);
         let passes = u32::try_from(TARGET_MS.div_ceil(per_pass)).unwrap_or(u32::MAX);
 
         Cost {
@@ -246,7 +246,8 @@ impl AutoLock {
     /// then locks: a step back of such a source never keeps the store open
     /// above its limit.
     pub fn due(&self, now: u64) -> bool {
-        now < self.last_activity || now - self.last_activity >= self.idle_limit
+        now.checked_sub(self.last_activity)
+            .is_none_or(|idle| idle >= self.idle_limit)
     }
 }
 

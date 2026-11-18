@@ -25,19 +25,19 @@ fn ln_inverse_1024(random: u32) -> u64 {
     ];
 
     let value = u64::from(random).saturating_add(1);
-    let bits = 64 - value.leading_zeros();
+    let bits = 64u32.saturating_sub(value.leading_zeros());
     let top = bits.saturating_sub(1);
     let mantissa = if top >= 4 {
-        (value >> (top - 4)) & 0x0F
+        (value >> top.saturating_sub(4)) & 0x0F
     } else {
-        (value << (4 - top)) & 0x0F
+        (value << 4u32.saturating_sub(top)) & 0x0F
     };
 
-    let log2_value = u64::from(top).saturating_mul(1024)
-        + FRACTION
-            .get(usize::try_from(mantissa).unwrap_or(0))
-            .copied()
-            .unwrap_or(0);
+    let fraction = FRACTION
+        .get(usize::try_from(mantissa).unwrap_or(0))
+        .copied()
+        .unwrap_or(0);
+    let log2_value = u64::from(top).saturating_mul(1024).saturating_add(fraction);
     let log2_max = 32u64 * 1024;
     log2_max.saturating_sub(log2_value).saturating_mul(LN2) / 1024
 }

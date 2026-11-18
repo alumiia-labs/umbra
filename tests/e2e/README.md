@@ -49,12 +49,25 @@ Each scenario continues from the state of the one before it.
 | messages | A message goes in each direction. |
 | edit | An edit shows at the contact. |
 | reaction | A reaction shows at the sender. |
+| reply | A reply shows with the text that it answers. |
 | delete for everyone | A deleted message leaves the view of the contact. |
+| poll | A vote shows in the count of both sides. |
+| verify | Each side starts, and the two devices show one short code. |
+| search | The search finds a message, and it finds none for an unknown word. |
 | lock | A wrong passphrase opens nothing. The right one shows the history. |
+| passphrase | After a change, the new passphrase alone opens the store. |
 | offline | A message to a stopped app arrives after its start. |
 | group | An offer, a join, and a let-in make a group of two. |
+| handle | A request to a claimed handle makes a contact. |
+| group of three | A third member joins and each member gets its messages. |
+| removal | A removed member gets no later message. A member that leaves can send no more. |
 | link | A third emulator joins the device set and gets the contacts. |
 | linked messages | Each device of the set gets a message and can send. |
+| device removal | A removed device leaves the list and gets no later message. |
+| restore | An erased device takes its identity again from the recovery code. |
+
+A full run takes about 20 minutes. The third emulator is a third user first. The `link` scenario
+clears it, and it then joins the device set of the first user.
 
 `--only=contact,group` runs a part of the list. A scenario with three
 emulators does not run with two.

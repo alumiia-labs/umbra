@@ -29,7 +29,7 @@ pub struct FamilyCert<'a> {
 impl<'a> FamilyCert<'a> {
     /// The preimage each member signs.
     pub fn preimage(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(80 + self.members.len() * 32);
+        let mut out = Vec::with_capacity(self.members.len().saturating_mul(32).saturating_add(80));
         out.extend_from_slice(labels::RELAY_FAMILY);
         out.push(0x01);
         out.extend_from_slice(&self.family_name);

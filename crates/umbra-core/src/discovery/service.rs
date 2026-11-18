@@ -375,7 +375,7 @@ impl LookupSeeds {
         // passes. A random drop hides which of its seeds is free.
         while !self.list.is_empty() && self.list.len() >= self.max {
             let len = u64::try_from(self.list.len()).unwrap_or(u64::MAX);
-            let index = usize::try_from(rng.next_u64() % len).unwrap_or(0);
+            let index = usize::try_from(rng.next_u64().checked_rem(len).unwrap_or(0)).unwrap_or(0);
             let dropped = self.list.swap_remove(index);
             self.held.remove(&dropped);
         }

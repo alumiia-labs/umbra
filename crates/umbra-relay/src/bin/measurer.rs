@@ -68,6 +68,7 @@
 //! divides each rate by 1 000. No deployment sets one of the three.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{
     collections::BTreeMap,
@@ -77,6 +78,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use umbra_relay::clock::unix_now;
 
 use umbra_core::directory::{
     bloc::BlocList,
@@ -86,35 +88,12 @@ use umbra_core::directory::{
     root::{Consensus, DirectoryKeySet},
     EPOCH_SECONDS,
 };
-use umbra_crypto::{rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing};
+use umbra_crypto::{hex, rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing};
 use umbra_relay::{
     measurer::{highest_class, measure, slot_width, slots, MeasureError, Plan, Target, SOCKETS},
     server::OsRng,
 };
 use umbra_transport::native;
-
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
-        return None;
-    }
-
-    let mut out = [0u8; 32];
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-
-    Some(out)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |at| at.as_secs())
-}
 
 fn write_new(path: &Path, bytes: &[u8], secret: bool) -> Result<(), &'static str> {
     let mut options = std::fs::OpenOptions::new();
@@ -146,11 +125,15 @@ fn keygen(dir: &Path) -> Result<(), &'static str> {
         .map_err(|_| "no random value")?;
 
     // `Zeroizing` wipes the hex form of the seed after its file took it.
-    let text = Zeroizing::new(to_hex(seed.expose()));
+    let text = Zeroizing::new(hex::write(seed.expose()));
     write_new(&dir.join("measurer.seed"), text.as_bytes(), true)?;
 
     let public = SigningKey::from_seed(seed).verifying_key().to_bytes();
-    write_new(&dir.join("measurer.pub"), to_hex(&public).as_bytes(), false)?;
+    write_new(
+        &dir.join("measurer.pub"),
+        hex::write(&public).as_bytes(),
+        false,
+    )?;
 
     println!("measurer.pub={} bytes", public.len());
     Ok(())
@@ -260,7 +243,8 @@ fn read_settings(path: &str) -> Result<Settings, &'static str> {
         )?)
         .map_err(|_| "the seed file does not read")?,
     );
-    let seed = Zeroizing::new(hex32(seed.trim()).ok_or("the seed file does not parse")?);
+    let seed =
+        Zeroizing::new(hex::read_array::<32>(seed.trim()).ok_or("the seed file does not parse")?);
     let key = Arc::new(SigningKey::from_seed(Secret::new(*seed)));
 
     let cert = std::fs::read(need(
@@ -343,7 +327,7 @@ fn record(results: &Path, result: &ClassResult, echoed_bits: u64) -> Result<(), 
 
     eprintln!(
         "relay {} echoed {} kbit/s",
-        to_hex(&result.relay_id),
+        hex::write(&result.relay_id),
         echoed_bits / 1_000
     );
     Ok(())
@@ -391,7 +375,7 @@ async fn run_slot(settings: &Settings, slot: &[(Target, u8)]) -> Result<bool, &'
                     MeasureError::NoSession => "no measurement session",
                     MeasureError::Local => "a local fault",
                 };
-                eprintln!("relay {} gave no result: {cause}", to_hex(&relay_id));
+                eprintln!("relay {} gave no result: {cause}", hex::write(&relay_id));
             }
         }
     }
@@ -481,7 +465,9 @@ fn run_main() -> ExitCode {
         }
         [command, _] if command == "run" => None,
         [command, _, relay, class] if command == "test" => {
-            let (Some(relay), Ok(class @ 0..=3)) = (hex32(relay), class.parse::<u8>()) else {
+            let (Some(relay), Ok(class @ 0..=3)) =
+                (hex::read_array::<32>(relay), class.parse::<u8>())
+            else {
                 eprintln!("the relay is 64 hex characters, and the class is 0 to 3");
                 return ExitCode::from(2);
             };
@@ -568,10 +554,11 @@ mod tests {
         let work = || {
             let mut tag = [0u8; 8];
             OsRng.try_fill_bytes(&mut tag).unwrap();
-            let home = std::env::temp_dir().join(format!("umbra-measurer-test-{}", to_hex(&tag)));
+            let home =
+                std::env::temp_dir().join(format!("umbra-measurer-test-{}", hex::write(&tag)));
             std::fs::create_dir_all(&home).unwrap();
 
-            std::fs::write(home.join("measurer.seed"), to_hex(&[7; 32])).unwrap();
+            std::fs::write(home.join("measurer.seed"), hex::write(&[7; 32])).unwrap();
             std::fs::write(home.join("measurer.cert"), b"cert").unwrap();
             std::fs::write(home.join("good.desc"), descriptor(1)).unwrap();
             std::fs::write(home.join("bad.desc"), b"no descriptor").unwrap();

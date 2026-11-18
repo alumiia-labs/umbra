@@ -12,7 +12,7 @@ use umbra_crypto::{hash::sha3_256, labels};
 /// against it.
 pub fn layer(seed: &[u8; 32], epoch: u64, relay_id: &[u8; 32]) -> u8 {
     let digest = sha3_256(&[labels::RELAY_LAYER, seed, &epoch.to_be_bytes(), relay_id]);
-    2 + (digest.last().copied().unwrap_or(0) & 0x01)
+    2u8.saturating_add(digest.last().copied().unwrap_or(0) & 0x01)
 }
 
 /// The seed of the layer function under the encoded `DirectoryRoot`

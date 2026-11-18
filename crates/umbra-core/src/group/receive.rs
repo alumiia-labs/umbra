@@ -564,7 +564,7 @@ impl Receiver {
                 let excess: Vec<(u16, u32, u32)> = self
                     .holes
                     .range(of_sender)
-                    .take(held - HOLES_MAX)
+                    .take(held.saturating_sub(HOLES_MAX))
                     .copied()
                     .collect();
                 for old in &excess {

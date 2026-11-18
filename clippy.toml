@@ -1,0 +1,8 @@
+# The operators of these types work in a group or modulo a fixed number.
+# They cannot overflow, thus `clippy::arithmetic_side_effects` skips them.
+arithmetic-side-effects-allowed = [
+    "curve25519_dalek::Scalar",
+    "curve25519_dalek::RistrettoPoint",
+    "curve25519_dalek::EdwardsPoint",
+    "crypto_bigint::modular::FixedMontyForm",
+]

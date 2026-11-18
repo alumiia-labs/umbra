@@ -159,8 +159,9 @@ impl DeadRow {
 
         let mut at = 0usize;
         let mut take = |len: usize| -> Result<&[u8], Error> {
-            let part = bytes.get(at..at + len).ok_or(Error::Integrity)?;
-            at += len;
+            let end = at.checked_add(len).ok_or(Error::Integrity)?;
+            let part = bytes.get(at..end).ok_or(Error::Integrity)?;
+            at = end;
             Ok(part)
         };
         let array = |part: &[u8]| -> Result<[u8; 8], Error> {

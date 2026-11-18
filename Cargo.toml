@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue", "crates/umbra-transport", "crates/umbra-core", "crates/umbra-relay", "crates/umbra-ffi", "crates/umbra-simd"]
 
 [workspace.package]
-version = "0.56.1"
+version = "0.56.2"
 edition = "2021"
 rust-version = "1.99"
 license = "AGPL-3.0-only"
@@ -49,7 +49,15 @@ opt-level = 3
 
 [profile.release]
 opt-level = 3
+# An overflow in a crate of this workspace ends the process and gives no
+# wrong value. The crates deny `clippy::arithmetic_side_effects` outside
+# their tests, thus no operator of them reaches this check.
+overflow-checks = true
 codegen-units = 1
 lto = "fat"
 panic = "abort"
 debug = false
+
+# A dependency keeps the release behavior that its authors test.
+[profile.release.package."*"]
+overflow-checks = false

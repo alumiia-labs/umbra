@@ -18,7 +18,7 @@ use umbra_core::{
     session::node::ClientNode,
 };
 
-use crate::runtime::{unix_now, OsRng};
+use crate::{clock::unix_now, runtime::OsRng};
 
 /// The solutions that an upload holds ahead for one relay at the most. A
 /// solution serves while its challenge is the newest, and an upload can end

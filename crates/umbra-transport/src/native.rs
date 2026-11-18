@@ -478,7 +478,7 @@ pub const READ_ROOM: usize = 16 << 10;
 /// frame. An unmasked frame takes 4 bytes less.
 pub const fn wire_len(capsule_len: usize) -> usize {
     let frame = websocket::frame_len(capsule_len, true);
-    frame + frame.div_ceil(RECORD_PLAIN) * RECORD_ADDS
+    frame.saturating_add(frame.div_ceil(RECORD_PLAIN).saturating_mul(RECORD_ADDS))
 }
 
 /// What a writer of a link and the [`Coalesced`] stream under its TLS session

@@ -491,7 +491,7 @@ impl<'a> ModerationEpoch<'a> {
 
     /// The preimage of `GRP-078`, label first; the hints stay out.
     pub fn preimage(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(96 + self.actions.len() * 17);
+        let mut out = Vec::with_capacity(self.actions.len().saturating_mul(17).saturating_add(96));
         out.extend_from_slice(labels::GROUP_MODERATION);
         out.extend_from_slice(&self.chain.preimage());
         out.extend_from_slice(&self.actor_index.to_be_bytes());
@@ -708,7 +708,10 @@ impl<'a> GroupInvitation<'a> {
                 let name_len = u8::try_from(name.len()).map_err(|_| Error::Malformed)?;
 
                 w.u8(0x01)?;
-                w.u16(u16::try_from(OFFER_FIXED + name.len()).map_err(|_| Error::Malformed)?)?;
+                w.u16(
+                    u16::try_from(OFFER_FIXED.saturating_add(name.len()))
+                        .map_err(|_| Error::Malformed)?,
+                )?;
                 w.u8(name_len)?;
                 w.put(name.as_bytes())?;
                 w.put(admin_roster_pk)?;
@@ -730,7 +733,8 @@ impl<'a> GroupInvitation<'a> {
 
                 w.u8(0x02)?;
                 w.u16(
-                    u16::try_from(ADMIT_FIXED + descriptor.len()).map_err(|_| Error::Malformed)?,
+                    u16::try_from(ADMIT_FIXED.saturating_add(descriptor.len()))
+                        .map_err(|_| Error::Malformed)?,
                 )?;
                 w.u16(*index)?;
                 w.u32(*epoch)?;

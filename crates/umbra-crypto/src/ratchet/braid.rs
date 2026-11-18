@@ -208,7 +208,7 @@ impl Braid {
         let material = self.material.as_ref().ok_or(Error::Ratchet)?;
         let width = self.width;
         let code = width.code();
-        let len = FRAME_FIXED + width.bytes();
+        let len = FRAME_FIXED.saturating_add(width.bytes());
         let out = out.get_mut(..len).ok_or(Error::Length)?;
 
         let (head, chunk) = out.split_at_mut(FRAME_FIXED);
@@ -230,7 +230,7 @@ impl Braid {
 
         material.chunk(width, index, chunk)?;
         // After the last chunk the sender returns to the first (CRY-131).
-        self.next_chunk = (index + 1) % code.n();
+        self.next_chunk = index.saturating_add(1).checked_rem(code.n()).unwrap_or(0);
         Ok(len)
     }
 
@@ -639,7 +639,7 @@ impl Ratchet {
 
     /// The record overhead when a frame rides the record.
     pub fn overhead_with_frame(&self) -> usize {
-        Session::overhead(FRAME_FIXED + self.braid.width.bytes())
+        Session::overhead(FRAME_FIXED.saturating_add(self.braid.width.bytes()))
     }
 
     /// The context field of the next record this party sends: its

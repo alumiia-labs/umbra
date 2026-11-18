@@ -288,7 +288,7 @@ impl Inner {
             return;
         };
 
-        let erase = Some((slot.handle, crate::runtime::copy_secret(&slot.cred)));
+        let erase = Some((slot.handle, slot.cred.duplicate()));
         let Some(tag) = self.link_tag_erasing(step, erase) else {
             return;
         };

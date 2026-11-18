@@ -1048,7 +1048,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         put_var(&mut value, &picture)?;
         self.put_row(REQUESTS, &id, &value, rng)?;
         let mut counted = epoch.to_be_bytes().to_vec();
-        counted.extend_from_slice(&(count + 1).to_be_bytes());
+        counted.extend_from_slice(&count.saturating_add(1).to_be_bytes());
         self.put_row(super::SETTINGS, &count_key, &counted, rng)?;
 
         Ok(Some(id))

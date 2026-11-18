@@ -27,7 +27,7 @@ use umbra_transport::{
     Dial,
 };
 
-use crate::runtime::{copy_secret, OsRng};
+use crate::runtime::OsRng;
 
 /// The tick that keeps the run from a stall with no traffic.
 const TICK: Duration = Duration::from_secs(1);
@@ -194,7 +194,7 @@ impl GroupCommand {
             } => GroupCommand::Notify {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: copy_secret(read),
+                read: read.duplicate(),
                 queue: queue.clone(),
                 on: *on,
             },
@@ -210,7 +210,7 @@ impl GroupCommand {
                 relay: *relay,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
-                own: copy_secret(own),
+                own: own.duplicate(),
                 payment: payment.clone(),
             },
             GroupCommand::Challenges { book, now } => GroupCommand::Challenges {
@@ -228,8 +228,8 @@ impl GroupCommand {
                 tag: *tag,
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                write: copy_secret(write),
-                fallback: fallback.as_ref().map(copy_secret),
+                write: write.duplicate(),
+                fallback: fallback.as_ref().map(Secret::duplicate),
                 record: record.clone(),
             },
             GroupCommand::Subscribe {
@@ -241,8 +241,8 @@ impl GroupCommand {
             } => GroupCommand::Subscribe {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: copy_secret(read),
-                fallback: fallback.as_ref().map(copy_secret),
+                read: read.duplicate(),
+                fallback: fallback.as_ref().map(Secret::duplicate),
                 from_seq: *from_seq,
             },
             GroupCommand::Repair {
@@ -254,8 +254,8 @@ impl GroupCommand {
             } => GroupCommand::Repair {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: copy_secret(read),
-                fallback: fallback.as_ref().map(copy_secret),
+                read: read.duplicate(),
+                fallback: fallback.as_ref().map(Secret::duplicate),
                 from_seq: *from_seq,
             },
             GroupCommand::Rotate {
@@ -268,7 +268,7 @@ impl GroupCommand {
             } => GroupCommand::Rotate {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                own: copy_secret(own),
+                own: own.duplicate(),
                 next_own_pk: *next_own_pk,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
@@ -280,7 +280,7 @@ impl GroupCommand {
             } => GroupCommand::Delete {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                own: copy_secret(own),
+                own: own.duplicate(),
             },
             GroupCommand::Chains(chains) => GroupCommand::Chains(chains.clone()),
         }
@@ -308,7 +308,7 @@ impl GroupCommand {
                 tag: *tag,
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                write: copy_secret(write),
+                write: write.duplicate(),
                 fallback: None,
                 record: record.clone(),
             }),
@@ -321,7 +321,7 @@ impl GroupCommand {
             } => Some(GroupCommand::Subscribe {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: copy_secret(read),
+                read: read.duplicate(),
                 fallback: None,
                 from_seq: *from_seq,
             }),
@@ -334,7 +334,7 @@ impl GroupCommand {
             } => Some(GroupCommand::Repair {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: copy_secret(read),
+                read: read.duplicate(),
                 fallback: None,
                 from_seq: *from_seq,
             }),
@@ -693,7 +693,7 @@ async fn session(
 
         let events = tokio::select! {
             received = link.recv() => match received {
-                Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
+                Ok(bytes) => match node.on_capsule(&bytes, crate::clock::unix_now(), &mut rng) {
                     Ok(events) => events,
                     Err(_) => break 'run End::Lost,
                 },
@@ -747,7 +747,7 @@ async fn session(
 
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
                 // NET-370: a circuit keeps the age that its relays count.
-                let now = crate::runtime::unix_now();
+                let now = crate::clock::unix_now();
                 if let Some(step) = circuit_clock.step(now) {
                     node.circuit_clock_moved(step);
                 }
@@ -802,7 +802,7 @@ async fn session(
                         // record of the backlog here.
                         if outcome == GroupOutcome::Refused(Reject::Limit) {
                             let wait = waits.entry(group_queue_id).or_insert(GSUB_AGAIN_FIRST);
-                            again.push((tokio::time::Instant::now() + *wait, command));
+                            again.push((crate::runtime::deadline_after(*wait), command));
                             *wait = wait.saturating_mul(2).min(GSUB_AGAIN_MAX);
                             continue;
                         }

@@ -49,6 +49,7 @@
 //! epochs (`REL-070`, `REL-103`).
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{path::Path, process::ExitCode};
 
@@ -62,28 +63,11 @@ use umbra_core::directory::{
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     AUTHORITY_COUNT, EPOCH_SECONDS,
 };
-use umbra_crypto::{hash::sha3_256, rand_core::TryRng, secret::Secret, sign::SigningKey};
+use umbra_crypto::{hash::sha3_256, hex, rand_core::TryRng, secret::Secret, sign::SigningKey};
 use umbra_relay::server::OsRng;
 
 /// The epoch of the key set of a test network.
 const KEYSET_EPOCH: u64 = 1;
-
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
-        return None;
-    }
-
-    let mut out = [0u8; 32];
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-
-    Some(out)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
 
 /// One `relay` line.
 struct Admitted {
@@ -132,7 +116,7 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
     let seed = text
         .lines()
         .find_map(|line| line.trim().strip_prefix("seed="))
-        .and_then(hex32)
+        .and_then(hex::read_array::<32>)
         .ok_or("the settings file needs a line: seed=<64 hex characters>")?;
     let keys = keys_of(&seed);
 
@@ -143,7 +127,7 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
     let mut public = Vec::with_capacity(text.len() / 2);
     for index in (0..text.len()).step_by(2) {
         let pair = text
-            .get(index..index + 2)
+            .get(index..index.saturating_add(2))
             .ok_or("the measurer key file does not parse")?;
         public.push(
             u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
@@ -176,7 +160,7 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
 
     println!(
         "measurer_id={} not_after={}",
-        to_hex(&measurer_id),
+        hex::write(&measurer_id),
         epoch.saturating_add(CERT_EPOCHS)
     );
 
@@ -194,7 +178,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
 
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
-            Some(("seed", value)) => seed = hex32(value),
+            Some(("seed", value)) => seed = hex::read_array::<32>(value),
             Some(("relay", value)) => {
                 relays.push(read_relay(value).ok_or("a relay line does not parse")?);
             }
@@ -204,11 +188,14 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 expelled.extend(
                     held.lines()
                         .filter_map(|line| line.strip_prefix("expel "))
-                        .filter_map(|relay| hex32(relay.trim())),
+                        .filter_map(|relay| hex::read_array::<32>(relay.trim())),
                 );
                 removed.extend(held.lines().filter_map(|line| {
                     let mut words = line.strip_prefix("link ")?.split_whitespace();
-                    let (one, other) = (hex32(words.next()?)?, hex32(words.next()?)?);
+                    let (one, other) = (
+                        hex::read_array::<32>(words.next()?)?,
+                        hex::read_array::<32>(words.next()?)?,
+                    );
                     let epoch = words.next()?.parse().ok()?;
                     Some(LinkRemoval::of(epoch, one, other))
                 }));
@@ -251,7 +238,10 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         .collect();
 
     for relay in peel(&live) {
-        println!("relay {} expelled by the link-fault search", to_hex(&relay));
+        println!(
+            "relay {} expelled by the link-fault search",
+            hex::write(&relay)
+        );
         expelled.push(relay);
     }
 
@@ -266,7 +256,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         let Some(class) = verified_class(&relay_id, relay.class, &results) else {
             println!(
                 "relay {} failed the class test of C0 and is not listed",
-                to_hex(&relay_id)
+                hex::write(&relay_id)
             );
             continue;
         };
@@ -289,13 +279,13 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
 
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
         if expelled.contains(&read.descriptor.relay_id) {
-            println!("relay {} expelled", to_hex(&read.descriptor.relay_id));
+            println!("relay {} expelled", hex::write(&read.descriptor.relay_id));
             continue;
         }
 
         println!(
             "relay {} layer={} class={} host={}",
-            to_hex(&read.descriptor.relay_id),
+            hex::write(&read.descriptor.relay_id),
             read.layer(),
             read.class,
             read.descriptor.host_str(),

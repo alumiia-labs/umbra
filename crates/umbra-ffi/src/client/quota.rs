@@ -380,7 +380,8 @@ mod tests {
     use crate::{
         bridge::Bridge,
         client::Client,
-        runtime::{unix_now, Command, OsRng, Prior},
+        clock::unix_now,
+        runtime::{Command, OsRng, Prior},
         ConversationId, Delivery, FailureCause, MsgRef,
     };
 

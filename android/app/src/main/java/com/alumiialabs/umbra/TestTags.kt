@@ -239,6 +239,7 @@ object TestTags {
     const val PUBLIC_LINK_RETIRE_CONFIRM = "public_link_retire_confirm"
     const val REQUEST_ACCEPT = "request_accept"
     const val REQUEST_DECLINE = "request_decline"
+    const val REQUEST_OPEN = "request_open"
 
     // The social recovery and the take-over.
     const val SOCIAL_CONTACT = "social_contact"

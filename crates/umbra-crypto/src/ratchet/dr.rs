@@ -556,7 +556,7 @@ impl Session {
 
     /// Bytes a record adds to its plaintext with a frame of `pq_frame_len`.
     pub const fn overhead(pq_frame_len: usize) -> usize {
-        RECORD_FIXED + pq_frame_len + BODY_TAG_LEN
+        (RECORD_FIXED + BODY_TAG_LEN).saturating_add(pq_frame_len)
     }
 
     /// Encrypts `plaintext` into `out` as one record with the optional braid
@@ -573,7 +573,7 @@ impl Session {
             return Err(Error::Length);
         }
 
-        let record_len = Self::overhead(frame.len()) + plaintext.len();
+        let record_len = Self::overhead(frame.len()).saturating_add(plaintext.len());
         let record = out.get_mut(..record_len).ok_or(Error::Length)?;
 
         // Each check runs before the chain moves, thus a call that fails
@@ -589,7 +589,7 @@ impl Session {
 
         // Everything before the body nonce is the associated data of the
         // body, thus a frame cannot move to another record.
-        let prefix_len = 5 + 12 + HDR_CT_LEN + 1 + frame.len();
+        let prefix_len = (5 + 12 + HDR_CT_LEN + 1).saturating_add(frame.len());
         let (prefix, body_region) = record.split_at_mut(prefix_len);
 
         // version || ctx
@@ -922,7 +922,7 @@ impl Session {
                 stored_at: now,
             });
             ck = next;
-            self.n_r += 1;
+            self.n_r = self.n_r.saturating_add(1);
         }
 
         // CRY-155: the keys of the oldest chains go.

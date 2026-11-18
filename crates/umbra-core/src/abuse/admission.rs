@@ -240,7 +240,7 @@ impl RelayGate {
             if *bytes != solution.solution || *left == 0 {
                 return Err(Reject::Admission);
             }
-            *left -= 1;
+            *left = left.saturating_sub(1);
             return Ok(holder);
         }
 

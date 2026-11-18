@@ -314,11 +314,10 @@ impl<'a> AttachmentBody<'a> {
     pub fn len(&self) -> usize {
         let trailer = match (self.name.as_deref(), self.preview, self.caption) {
             (None, None, None) => 0,
-            (name, preview, caption) => {
-                3 + name.map_or(0, str::len)
-                    + preview.map_or(0, <[u8]>::len)
-                    + caption.map_or(0, |caption| 2 + caption.len())
-            }
+            (name, preview, caption) => 3usize
+                .saturating_add(name.map_or(0, str::len))
+                .saturating_add(preview.map_or(0, <[u8]>::len))
+                .saturating_add(caption.map_or(0, |caption| caption.len().saturating_add(2))),
         };
         self.descriptor.len().saturating_add(trailer)
     }
@@ -365,7 +364,7 @@ impl<'a> AttachmentBody<'a> {
             w.u16(u16::try_from(caption.len()).map_err(|_| Error::Malformed)?)?;
             w.put(caption.as_bytes())?;
         }
-        Ok(at + w.position())
+        at.checked_add(w.position()).ok_or(Error::Malformed)
     }
 }
 

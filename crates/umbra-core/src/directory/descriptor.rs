@@ -182,7 +182,7 @@ impl<'a> RelayDescriptor<'a> {
         let key = VerifyingKey::from_bytes(out.identity_pk)?;
         let sig = Signature::from_bytes(out.sig)?;
         let mut preimage =
-            alloc::vec::Vec::with_capacity(labels::RELAY_DESCRIPTOR.len() + SIGNED_LEN);
+            alloc::vec::Vec::with_capacity(const { labels::RELAY_DESCRIPTOR.len() + SIGNED_LEN });
         preimage.extend_from_slice(labels::RELAY_DESCRIPTOR);
         preimage.extend_from_slice(bytes.get(..SIGNED_LEN).ok_or(Error::Malformed)?);
         key.verify(&preimage, &sig)?;
@@ -223,7 +223,8 @@ impl<'a> RelayDescriptor<'a> {
         let mut w = Writer::new(&mut body);
         self.put_signed(&mut w)?;
 
-        let mut out = alloc::vec::Vec::with_capacity(labels::RELAY_DESCRIPTOR.len() + SIGNED_LEN);
+        let mut out =
+            alloc::vec::Vec::with_capacity(const { labels::RELAY_DESCRIPTOR.len() + SIGNED_LEN });
         out.extend_from_slice(labels::RELAY_DESCRIPTOR);
         out.extend_from_slice(&body);
         Ok(out)

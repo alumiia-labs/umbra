@@ -107,7 +107,7 @@ impl core::fmt::Debug for Token {
 impl Token {
     /// The encoded length.
     pub fn len(&self) -> usize {
-        TOKEN_HEAD + self.authenticator.len()
+        TOKEN_HEAD.saturating_add(self.authenticator.len())
     }
 
     /// Whether the authenticator is empty. Clippy asks for this beside

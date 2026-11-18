@@ -30,16 +30,16 @@ pub fn base32(bytes: &[u8]) -> String {
     let mut bits = 0u32;
     for b in bytes {
         acc = (acc << 8) | u32::from(*b);
-        bits += 8;
+        bits = bits.saturating_add(8);
         while bits >= 5 {
-            bits -= 5;
+            bits = bits.saturating_sub(5);
             let idx = ((acc >> bits) & 31) as usize;
             out.push(char::from(ALPHABET.get(idx).copied().unwrap_or(b'0')));
         }
     }
 
     if bits > 0 {
-        let idx = ((acc << (5 - bits)) & 31) as usize;
+        let idx = ((acc << 5u32.saturating_sub(bits)) & 31) as usize;
         out.push(char::from(ALPHABET.get(idx).copied().unwrap_or(b'0')));
     }
 
@@ -71,18 +71,18 @@ pub fn base32_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
     let mut at = 0usize;
     for c in text.chars() {
         acc = (acc << 5) | value_of(c).ok_or(Error::Malformed)?;
-        bits += 5;
+        bits = bits.saturating_add(5);
         if bits >= 8 {
-            bits -= 8;
+            bits = bits.saturating_sub(8);
             if let Some(slot) = out.get_mut(at) {
                 *slot = ((acc >> bits) & 0xFF) as u8;
             }
-            at += 1;
+            at = at.saturating_add(1);
         }
     }
 
     // The spare low bits of the last character are zero in canonical form.
-    if acc & ((1 << bits) - 1) != 0 {
+    if acc & (1u32 << bits).saturating_sub(1) != 0 {
         return Err(Error::Malformed);
     }
 
@@ -175,7 +175,7 @@ pub fn decimal(bytes: &[u8], width: usize) -> String {
             *b = (cur / 10) as u8;
             rem = cur % 10;
         }
-        digits.push(b'0' + rem as u8);
+        digits.push(b'0'.saturating_add(rem as u8));
     }
 
     while digits.len() < width {
@@ -195,7 +195,9 @@ pub fn avatar_color(public_key: &[u8]) -> u8 {
     // The digest as a big-endian integer modulo 12: fold byte by byte.
     let mut rem: u32 = 0;
     for b in digest {
-        rem = ((rem << 8) | u32::from(b)) % u32::from(PALETTE_SIZE);
+        rem = ((rem << 8) | u32::from(b))
+            .checked_rem(u32::from(PALETTE_SIZE))
+            .unwrap_or(0);
     }
     rem as u8
 }

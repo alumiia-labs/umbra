@@ -67,68 +67,68 @@ impl Bucket {
 
     /// The `body` of the cell, after `circ_id` and `tag`.
     pub const fn body_len(self) -> usize {
-        self.cell_len() - CELL_OVERHEAD
+        self.cell_len().saturating_sub(CELL_OVERHEAD)
     }
 
     /// The command area: the body less the command byte and one padding
     /// marker.
     pub const fn command_area(self) -> usize {
-        self.body_len() - 2
+        self.body_len().saturating_sub(2)
     }
 
     /// The L5 payload of a `MSG` or a `GMSG`.
     pub const fn l5_payload(self) -> usize {
-        self.command_area() - COMMAND_HEADER
+        self.command_area().saturating_sub(COMMAND_HEADER)
     }
 
     /// The L6 record on a `MSG`, which is the payload of a `SEND`.
     pub const fn l6_record(self) -> usize {
-        self.l5_payload() - 4
+        self.l5_payload().saturating_sub(4)
     }
 
     /// The L7 record inside the L6 layer.
     pub const fn l7_record(self) -> usize {
-        self.l6_record() - L6_OVERHEAD
+        self.l6_record().saturating_sub(L6_OVERHEAD)
     }
 
     /// The `AppMessage` with a default braid chunk.
     pub const fn app_default_chunk(self) -> usize {
-        self.l7_record() - L7_OVERHEAD_DEFAULT_CHUNK
+        self.l7_record().saturating_sub(L7_OVERHEAD_DEFAULT_CHUNK)
     }
 
     /// The `AppMessage` with no braid frame.
     pub const fn app_no_frame(self) -> usize {
-        self.l7_record() - L7_OVERHEAD_NO_FRAME
+        self.l7_record().saturating_sub(L7_OVERHEAD_NO_FRAME)
     }
 
     /// The text of an `AppMessage` with a default braid chunk.
     pub const fn text_default_chunk(self) -> usize {
-        self.app_default_chunk() - APP_HEADER
+        self.app_default_chunk().saturating_sub(APP_HEADER)
     }
 
     /// The text of an `AppMessage` with no braid frame.
     pub const fn text_no_frame(self) -> usize {
-        self.app_no_frame() - APP_HEADER
+        self.app_no_frame().saturating_sub(APP_HEADER)
     }
 
     /// The `GroupQueueRecord` on a `GMSG`, which is the payload of a `GPOST`.
     pub const fn group_record(self) -> usize {
-        self.l5_payload() - 4
+        self.l5_payload().saturating_sub(4)
     }
 
     /// The `body` of a `GroupQueueRecord`.
     pub const fn group_body(self) -> usize {
-        self.group_record() - GROUP_RECORD_FIXED
+        self.group_record().saturating_sub(GROUP_RECORD_FIXED)
     }
 
     /// The `ContentPlain` of a content record.
     pub const fn content_plain(self) -> usize {
-        self.group_body() - GROUP_RECORD_TAG
+        self.group_body().saturating_sub(GROUP_RECORD_TAG)
     }
 
     /// The tags and the `app` of a content record.
     pub const fn tags_and_app(self) -> usize {
-        self.content_plain() - CONTENT_PLAIN_FIXED
+        self.content_plain().saturating_sub(CONTENT_PLAIN_FIXED)
     }
 
     /// The `app` of a dense content record at `members` active members, if

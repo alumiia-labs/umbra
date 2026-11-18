@@ -12,6 +12,7 @@
 //! its counter, and a new run sends again each one that no peer
 //! acknowledged.
 
+use crate::clock::unix_now;
 use std::collections::BTreeMap;
 
 use umbra_core::{
@@ -45,12 +46,6 @@ use crate::{ConversationId, Error, Event, MsgRef};
 /// its row, its key, its value, its Lamport counter, and its writer
 /// (`DEV-308`).
 type RelayItem = (u8, Vec<u8>, Vec<u8>, u64, DeviceId);
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
 
 /// The stored form of the sync engine.
 pub(super) const SYNC_STATE: TableId = TableId(0x24);
@@ -614,7 +609,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.drop_lapsed_held(super::unix_now_seconds())?;
+        self.drop_lapsed_held(unix_now())?;
 
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -715,7 +710,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let mut held: Vec<(u64, RowId, super::Record)> = Vec::new();
-        let now = super::unix_now_seconds();
+        let now = unix_now();
         for (row, plain) in self.open_ref()?.store.list(PAIRWISE_HELD, None)? {
             let plain = Zeroizing::new(plain);
             if plain.get(..32) != Some(subject.as_slice()) {

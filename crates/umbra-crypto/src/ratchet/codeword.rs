@@ -36,6 +36,17 @@ fn window_mut(buf: &mut [u8], at: usize, len: usize) -> Result<&mut [u8], Error>
         .ok_or(Error::Length)
 }
 
+/// Chunk `index` of `buf`, which holds chunks of `w` bytes, or
+/// `Error::Length`.
+fn chunk_at(buf: &[u8], index: usize, w: usize) -> Result<&[u8], Error> {
+    window(buf, index.checked_mul(w).ok_or(Error::Length)?, w)
+}
+
+/// Chunk `index` of `buf` for writing, or `Error::Length`.
+fn chunk_at_mut(buf: &mut [u8], index: usize, w: usize) -> Result<&mut [u8], Error> {
+    window_mut(buf, index.checked_mul(w).ok_or(Error::Length)?, w)
+}
+
 /// The `kind` byte of a `PqFrame` (Part 6 §6.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -109,7 +120,11 @@ impl Width {
 
     /// `k = 2304 / w` and `r = ceil(k / 8)` (`CRY-077`, `CRY-078`).
     pub const fn code(self) -> Code {
-        let k = MATERIAL_LEN / self.bytes();
+        let k = match self {
+            Self::W32 => MATERIAL_LEN / 32,
+            Self::W64 => MATERIAL_LEN / 64,
+            Self::W128 => MATERIAL_LEN / 128,
+        };
         Code {
             k,
             r: k.div_ceil(8),
@@ -118,7 +133,7 @@ impl Width {
 
     /// `pq_frame_len`: 7 bytes of frame header and the chunk.
     pub const fn frame_len(self) -> u8 {
-        (7 + self.bytes()) as u8
+        self.bytes().saturating_add(7) as u8
     }
 
     /// The width that a `pq_frame_len` names.
@@ -141,7 +156,7 @@ impl Width {
             return Ok(Kind::Parity);
         }
 
-        let start = index * self.bytes();
+        let start = index.saturating_mul(self.bytes());
         Ok(if start < HEADER_LEN {
             Kind::Header
         } else if start < HEADER_LEN + EK_VECTOR_LEN {
@@ -221,8 +236,10 @@ impl Material {
     pub fn encode(&self, width: Width, out: &mut [u8]) -> Result<(), Error> {
         let code = width.code();
         let w = width.bytes();
-        let out = out.get_mut(..code.n() * w).ok_or(Error::Length)?;
-        let (data, parity) = out.split_at_mut(code.k * w);
+        let out = out
+            .get_mut(..code.n().saturating_mul(w))
+            .ok_or(Error::Length)?;
+        let (data, parity) = out.split_at_mut(code.k.saturating_mul(w));
         data.copy_from_slice(&self.0);
         code.encode(w, &self.0, parity)
     }
@@ -234,14 +251,14 @@ impl Material {
         let out = out.get_mut(..w).ok_or(Error::Length)?;
 
         if index < code.k {
-            out.copy_from_slice(window(&self.0, index * w, w)?);
+            out.copy_from_slice(chunk_at(&self.0, index, w)?);
             return Ok(());
         }
 
         // A parity chunk needs the whole code; encode into a stack buffer.
         let mut all = [0u8; MAX_N * 128];
         self.encode(width, &mut all)?;
-        out.copy_from_slice(window(&all, index * w, w)?);
+        out.copy_from_slice(chunk_at(&all, index, w)?);
         Ok(())
     }
 }
@@ -287,8 +304,8 @@ impl Collector {
         if let Some(slot) = self.held.get_mut(index) {
             if !*slot {
                 *slot = true;
-                self.count += 1;
-                if let Some(dst) = self.chunks.get_mut(index * w..(index + 1) * w) {
+                self.count = self.count.saturating_add(1);
+                if let Ok(dst) = chunk_at_mut(&mut self.chunks, index, w) {
                     dst.copy_from_slice(chunk);
                 }
             }
@@ -319,7 +336,7 @@ impl Collector {
         writer.u16(u16::try_from(self.count).map_err(|_| Error::Length)?);
         for (index, _) in self.held.iter().enumerate().filter(|(_, held)| **held) {
             writer.u8(u8::try_from(index).map_err(|_| Error::Length)?);
-            writer.bytes(window(&self.chunks, index * w, w)?);
+            writer.bytes(chunk_at(&self.chunks, index, w)?);
         }
         Ok(())
     }
@@ -350,7 +367,7 @@ impl Collector {
 
         let mut positions = [0usize; MAX_K];
         let mut received = [0u8; MAX_K * 128];
-        let mut taken = 0;
+        let mut taken = 0usize;
 
         for (index, &h) in self.held.iter().enumerate().take(code.n()) {
             if !h || taken == code.k {
@@ -359,19 +376,19 @@ impl Collector {
             if let Some(slot) = positions.get_mut(taken) {
                 *slot = index;
             }
-            window_mut(&mut received, taken * w, w)?.copy_from_slice(window(
+            chunk_at_mut(&mut received, taken, w)?.copy_from_slice(chunk_at(
                 &self.chunks,
-                index * w,
+                index,
                 w,
             )?);
-            taken += 1;
+            taken = taken.saturating_add(1);
         }
 
         let mut out = [0u8; MATERIAL_LEN];
         code.decode(
             w,
             window_positions(&positions, code.k)?,
-            window(&received, 0, code.k * w)?,
+            window(&received, 0, code.k.checked_mul(w).ok_or(Error::Length)?)?,
             &mut out,
         )?;
         Ok(Material(out))

@@ -58,24 +58,38 @@ impl<'a> RelayManifest<'a> {
         let entries: usize = self
             .entries
             .iter()
-            .map(|entry| ENTRY_LEN + 1 + entry.proof.len() * STEP_LEN)
+            .map(|entry| {
+                entry
+                    .proof
+                    .len()
+                    .saturating_mul(STEP_LEN)
+                    .saturating_add(const { ENTRY_LEN + 1 })
+            })
             .sum();
         let queues = if self.queues.is_empty() && self.removals.is_empty() {
             0
         } else {
-            1 + self.queues.len() * REPORT_QUEUE_LEN
+            self.queues
+                .len()
+                .saturating_mul(REPORT_QUEUE_LEN)
+                .saturating_add(1)
         };
         let removals = if self.removals.is_empty() {
             0
         } else {
-            2 + self
-                .removals
+            self.removals
                 .iter()
                 .map(|removal| removal.len())
                 .sum::<usize>()
+                .saturating_add(2)
         };
 
-        1 + 2 + self.root.len() + 2 + entries + queues + removals
+        (1usize + 2)
+            .saturating_add(self.root.len())
+            .saturating_add(2)
+            .saturating_add(entries)
+            .saturating_add(queues)
+            .saturating_add(removals)
     }
 
     /// Whether the manifest holds no entry.

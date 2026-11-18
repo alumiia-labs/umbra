@@ -30,7 +30,13 @@ const fn header_len(len: usize) -> usize {
 
 /// The frame length for a payload of `len` bytes, masked or not.
 pub const fn frame_len(len: usize, masked: bool) -> usize {
-    header_len(len) + if masked { MASK_LEN } else { 0 } + len
+    body_at(len, masked).saturating_add(len)
+}
+
+/// The place of the payload in a frame: after the header and the mask.
+const fn body_at(len: usize, masked: bool) -> usize {
+    let mask_len = if masked { MASK_LEN } else { 0 };
+    header_len(len).saturating_add(mask_len)
 }
 
 // Whole words let the compiler use its vector forms. A `B3` frame took 15 us
@@ -145,7 +151,7 @@ fn whole_frame(bytes: &[u8], from_client: bool, max: usize) -> Result<Option<Fra
         return Ok(None);
     };
 
-    let body_at = header_len(len) + if masked { MASK_LEN } else { 0 };
+    let body_at = body_at(len, masked);
     let payload = frame.get(body_at..).ok_or(Error::Malformed)?;
 
     let mask = if masked {

@@ -90,7 +90,7 @@ pub fn seal(
     let (plain, tag_out) = out
         .get_mut(start..)
         .ok_or(Error::Capacity)?
-        .split_at_mut(end - start);
+        .split_at_mut(end.checked_sub(start).ok_or(Error::Capacity)?);
     let tag = key.seal(&nonce, VERSION, sender_id, plain)?;
     tag_out.copy_from_slice(&tag);
     Ok(record_len)

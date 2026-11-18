@@ -168,6 +168,7 @@
 //! applies no family ceiling and no ASN ceiling either (`REL-211`).
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{
     io::Write,
@@ -191,7 +192,7 @@ use umbra_core::directory::{
     AUTHORITY_COUNT, AUTHORITY_FLOOR, EPOCH_SECONDS, MEASURER_REVOKE_MAX,
 };
 use umbra_crypto::{
-    hash::sha3_256, rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing,
+    hash::sha3_256, hex, rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing,
 };
 use umbra_relay::server::OsRng;
 
@@ -199,36 +200,6 @@ use umbra_relay::server::OsRng;
 const FIRST_KEYSET_EPOCH: u64 = 1;
 /// The one operator of a provisional directory.
 const INDEPENDENT_COUNT: u8 = 1;
-
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
-        return None;
-    }
-
-    let mut out = [0u8; 32];
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-
-    Some(out)
-}
-
-fn hex16(text: &str) -> Option<[u8; 16]> {
-    if text.len() != 32 {
-        return None;
-    }
-
-    let mut out = [0u8; 16];
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-
-    Some(out)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
 
 fn seed_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(format!("authority-{index}.seed"))
@@ -277,7 +248,7 @@ fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("the key directory has no name")?;
-    let staging = dir.with_file_name(format!(".{name}.keygen-{}", to_hex(&tag)));
+    let staging = dir.with_file_name(format!(".{name}.keygen-{}", hex::write(&tag)));
 
     if let Some(parent) = staging.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|_| "the key directory does not open")?;
@@ -303,7 +274,7 @@ fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
     println!(
         "keyset={} bytes sha3-256={}",
         keyset.len(),
-        to_hex(&sha3_256(&[&keyset]))
+        hex::write(&sha3_256(&[&keyset]))
     );
 
     Ok(())
@@ -326,7 +297,7 @@ fn fill_keys(staging: &Path, keyset_epoch: u64) -> Result<Vec<u8>, &'static str>
             .try_fill_bytes(seed.expose_mut())
             .map_err(|_| "the system gives no randomness")?;
         // `Zeroizing` wipes the hex form of the seed after its file took it.
-        let text = Zeroizing::new(to_hex(seed.expose()));
+        let text = Zeroizing::new(hex::write(seed.expose()));
         write_whole(&seed_path(staging, index), text.as_bytes(), true)?;
         keys.push(SigningKey::from_seed(seed));
     }
@@ -345,7 +316,8 @@ fn read_keys(dir: &Path) -> Result<(Vec<SigningKey>, Vec<u8>), &'static str> {
             std::fs::read_to_string(seed_path(dir, index))
                 .map_err(|_| "a seed file does not read")?,
         );
-        let seed = Zeroizing::new(hex32(text.trim()).ok_or("a seed file does not parse")?);
+        let seed =
+            Zeroizing::new(hex::read_array::<32>(text.trim()).ok_or("a seed file does not parse")?);
         keys.push(SigningKey::from_seed(Secret::new(*seed)));
     }
 
@@ -570,7 +542,7 @@ fn measurer_cert(
     let mut public = Vec::with_capacity(text.len() / 2);
     for index in (0..text.len()).step_by(2) {
         let pair = text
-            .get(index..index + 2)
+            .get(index..index.saturating_add(2))
             .ok_or("the measurer key file does not parse")?;
         public.push(
             u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
@@ -597,7 +569,7 @@ fn measurer_cert(
 
     println!(
         "measurer_id={} not_after={}",
-        to_hex(&measurer_id),
+        hex::write(&measurer_id),
         epoch.saturating_add(lifetime)
     );
     Ok(())
@@ -611,7 +583,7 @@ fn read_class_state(text: &str) -> ClassState {
     text.lines()
         .filter_map(|line| {
             let mut words = line.split_whitespace();
-            let relay = hex32(words.next()?)?;
+            let relay = hex::read_array::<32>(words.next()?)?;
             let class = words.next()?.parse().ok()?;
             let stepped_at = words.next()?.parse().ok()?;
             Some((relay, Staged { class, stepped_at }))
@@ -623,7 +595,12 @@ fn class_state_text(state: &ClassState) -> String {
     state
         .iter()
         .map(|(relay, staged)| {
-            format!("{} {} {}\n", to_hex(relay), staged.class, staged.stepped_at)
+            format!(
+                "{} {} {}\n",
+                hex::write(relay),
+                staged.class,
+                staged.stepped_at
+            )
         })
         .collect()
 }
@@ -766,8 +743,8 @@ fn read_admission_state(text: &str) -> AdmissionState {
     text.lines()
         .filter_map(|line| {
             let mut words = line.split_whitespace();
-            let relay = hex32(words.next()?)?;
-            let root = hex32(words.next()?)?;
+            let relay = hex::read_array::<32>(words.next()?)?;
+            let root = hex::read_array::<32>(words.next()?)?;
             let epoch = words.next()?.parse().ok()?;
             Some((relay, PendingRoot { root, epoch }))
         })
@@ -780,8 +757,8 @@ fn admission_state_text(state: &AdmissionState) -> String {
         .map(|(relay, first)| {
             format!(
                 "{} {} {}\n",
-                to_hex(relay),
-                to_hex(&first.root),
+                hex::write(relay),
+                hex::write(&first.root),
                 first.epoch
             )
         })
@@ -1023,7 +1000,7 @@ fn entry_for(
                     println!(
                         "relay {} has no passed class test inside MEASURE_STALE, \
                          and it is listed at C0",
-                        to_hex(&relay_id)
+                        hex::write(&relay_id)
                     );
                 }
                 listed_class(
@@ -1040,7 +1017,7 @@ fn entry_for(
         let Some(class) = class else {
             println!(
                 "relay {} failed the class test of C0 and is not listed",
-                to_hex(&relay_id)
+                hex::write(&relay_id)
             );
             return Ok(None);
         };
@@ -1060,7 +1037,7 @@ fn entry_for(
                 println!(
                     "relay {} of another operator has no passed class test of C0, \
                      and it stays pending",
-                    to_hex(&relay_id)
+                    hex::write(&relay_id)
                 );
                 let pending = Stage {
                     admission: Admission::Pending,
@@ -1083,7 +1060,7 @@ fn entry_for(
 
     let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
     if run.expelled.contains(&relay_id) {
-        println!("relay {} expelled", to_hex(&relay_id));
+        println!("relay {} expelled", hex::write(&relay_id));
         return Ok(None);
     }
 
@@ -1100,7 +1077,7 @@ fn entry_for(
         };
         println!(
             "relay {} {cause}, and it is no ingress relay",
-            to_hex(&relay_id)
+            hex::write(&relay_id)
         );
     }
 
@@ -1111,7 +1088,7 @@ fn entry_for(
     if !own && relay.place == Place::Ingress && !stage.is_ingress {
         println!(
             "relay {} of another operator waits for the ingress flag (§10.7.1)",
-            to_hex(&relay_id)
+            hex::write(&relay_id)
         );
     }
 
@@ -1124,7 +1101,7 @@ fn entry_for(
     // the floor.
     println!(
         "relay {} ingress={} layer={} class={} host={} pending={}",
-        to_hex(&relay_id),
+        hex::write(&relay_id),
         read.ingress(),
         read.layer(),
         read.class,
@@ -1192,11 +1169,14 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
                 expelled.extend(
                     held.lines()
                         .filter_map(|line| line.strip_prefix("expel "))
-                        .filter_map(|relay| hex32(relay.trim())),
+                        .filter_map(|relay| hex::read_array::<32>(relay.trim())),
                 );
                 removed.extend(held.lines().filter_map(|line| {
                     let mut words = line.strip_prefix("link ")?.split_whitespace();
-                    let (one, other) = (hex32(words.next()?)?, hex32(words.next()?)?);
+                    let (one, other) = (
+                        hex::read_array::<32>(words.next()?)?,
+                        hex::read_array::<32>(words.next()?)?,
+                    );
                     let epoch = words.next()?.parse().ok()?;
                     Some(LinkRemoval::of(epoch, one, other))
                 }));
@@ -1216,7 +1196,7 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
                 let (id, not_after) = value
                     .split_once(',')
                     .ok_or("a revoked line does not parse")?;
-                let id = hex16(id).ok_or("a revoked line does not parse")?;
+                let id = hex::read_array::<16>(id).ok_or("a revoked line does not parse")?;
                 let not_after = not_after
                     .parse()
                     .map_err(|_| "a revoked line does not parse")?;
@@ -1326,7 +1306,10 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
         .collect();
 
     for relay in peel(&live) {
-        println!("relay {} expelled by the link-fault search", to_hex(&relay));
+        println!(
+            "relay {} expelled by the link-fault search",
+            hex::write(&relay)
+        );
         expelled.push(relay);
     }
 
@@ -1716,7 +1699,7 @@ mod tests {
     fn signer_home() -> PathBuf {
         let mut tag = [0u8; 8];
         OsRng.try_fill_bytes(&mut tag).unwrap();
-        let home = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
+        let home = std::env::temp_dir().join(format!("umbra-signer-test-{}", hex::write(&tag)));
         std::fs::create_dir_all(&home).unwrap();
         keygen(&home.join("keys"), FIRST_KEYSET_EPOCH).unwrap();
         home
@@ -2444,7 +2427,7 @@ mod tests {
         on_a_signing_stack(|| {
             let mut tag = [0u8; 8];
             OsRng.try_fill_bytes(&mut tag).unwrap();
-            let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
+            let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", hex::write(&tag)));
             std::fs::create_dir_all(&root).unwrap();
 
             // A live key directory with the name that an earlier keygen
@@ -2532,7 +2515,7 @@ mod tests {
 
             let mut tag = [0u8; 8];
             OsRng.try_fill_bytes(&mut tag).unwrap();
-            let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
+            let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", hex::write(&tag)));
             std::fs::create_dir_all(&root).unwrap();
 
             let chain = root.join("keychain");
@@ -2663,8 +2646,11 @@ mod tests {
                 RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), 700 * 3_600).is_ok()
             );
 
-            assert_eq!(hex16(&to_hex(&[0x4D; 16])), Some([0x4D; 16]));
-            assert_eq!(hex16("4d"), None);
+            assert_eq!(
+                hex::read_array::<16>(&hex::write(&[0x4D; 16])),
+                Some([0x4D; 16])
+            );
+            assert_eq!(hex::read_array::<16>("4d"), None);
         });
     }
 

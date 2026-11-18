@@ -538,7 +538,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let rendezvous = self.rendezvous_to_owe()?;
         let mut leaving = self.setting(LEAVING_CHANNELS)?.unwrap_or_default();
         let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
-        let notice = [super::unix_now_seconds().to_be_bytes().as_slice(), epoch].concat();
+        let notice = [crate::clock::unix_now().to_be_bytes().as_slice(), epoch].concat();
         let open = self.open_mut()?;
         let owed_row = open.store.row_id(SETTINGS, ROTATION_OWED);
         let rendezvous_row = open.store.row_id(SETTINGS, RENDEZVOUS_OWED);
@@ -1056,7 +1056,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let roster = Roster::parse(&bytes)?;
         let channels = self.peer_channels()?;
         let leaving = self.leaving_channels()?;
-        let now = super::unix_now_seconds();
+        let now = crate::clock::unix_now();
         for device in roster
             .revoked
             .iter()
@@ -1347,7 +1347,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         // DEV-230: with no record of the existing device yet, its absence
         // counts from the link.
-        self.note_owner_heard(super::unix_now_seconds(), rng)?;
+        self.note_owner_heard(crate::clock::unix_now(), rng)?;
 
         // IDN-183 is for a restore: a linked device renews no contact, and
         // DEV-117 holds no deletion of the other devices.

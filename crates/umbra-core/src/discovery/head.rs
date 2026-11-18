@@ -194,7 +194,7 @@ impl<'a> LogKeySet<'a> {
     /// The preimage that the previous set signs for this set
     /// (`DIS-064`).
     pub fn rotation_preimage(&self) -> Result<Vec<u8>, Error> {
-        let mut out = Vec::with_capacity(labels::TREE_HEAD_KEYSET.len() + 1 + 8 + 32);
+        let mut out = Vec::with_capacity(const { labels::TREE_HEAD_KEYSET.len() + 1 + 8 + 32 });
         out.extend_from_slice(labels::TREE_HEAD_KEYSET);
         out.push(0x01);
         out.extend_from_slice(&self.keyset_epoch.to_be_bytes());
@@ -287,7 +287,7 @@ impl<'a> SignedTreeHead<'a> {
 
     /// The signed preimage: the label and the fields before `sig_count`.
     pub fn preimage(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(labels::TREE_HEAD.len() + HEAD_FIXED);
+        let mut out = Vec::with_capacity(const { labels::TREE_HEAD.len() + HEAD_FIXED });
         out.extend_from_slice(labels::TREE_HEAD);
         out.push(0x01);
         out.extend_from_slice(&self.tree_size.to_be_bytes());

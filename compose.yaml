@@ -19,7 +19,7 @@ name: umbra-relay
 # .env to the name with the digest of the release run:
 # ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>.
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.56.1}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.56.2}
   build:
     context: .
     target: relay

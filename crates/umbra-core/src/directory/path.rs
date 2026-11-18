@@ -87,7 +87,10 @@ pub fn weighted_order(
         let mut end = bucket.len();
         while end > 1 {
             let bound = u64::try_from(end).unwrap_or(u64::MAX);
-            let pick = usize::try_from(random(bound)).unwrap_or(0) % end;
+            let pick = usize::try_from(random(bound))
+                .unwrap_or(0)
+                .checked_rem(end)
+                .unwrap_or(0);
             bucket.swap(pick, end.saturating_sub(1));
             end = end.saturating_sub(1);
         }

@@ -71,7 +71,7 @@ impl RelaySetDiff {
         for chunk in self.levels.chunks(4) {
             let mut byte = 0u8;
             for (i, level) in chunk.iter().enumerate() {
-                byte |= (*level as u8) << (2 * i);
+                byte |= (*level as u8) << i.saturating_mul(2);
             }
             w.u8(byte)?;
         }
@@ -115,13 +115,13 @@ impl RelaySetDiff {
         let mut levels = Vec::with_capacity(leaf_count);
         for i in 0..leaf_count {
             let byte = packed.get(i / 4).copied().ok_or(Error::Malformed)?;
-            levels.push(StoreLevel::from_bits(byte >> (2 * (i % 4))));
+            levels.push(StoreLevel::from_bits(byte >> (i % 4).saturating_mul(2)));
         }
 
         // The spare bits of the last byte are zero in the canonical form.
         if let Some(last) = packed.last() {
             let used = leaf_count % 4;
-            if used != 0 && last >> (2 * used) != 0 {
+            if used != 0 && last >> used.saturating_mul(2) != 0 {
                 return Err(Error::Malformed);
             }
         }

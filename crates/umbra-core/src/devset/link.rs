@@ -389,7 +389,7 @@ impl LinkPending {
         .map_err(|_| Error::Unverified)?;
 
         let pending = LinkPending {
-            ss: copy_secret(&self.ss),
+            ss: self.ss.duplicate(),
             transcript: self.transcript,
         };
         Ok(pending.with_reply(value))
@@ -459,7 +459,12 @@ impl LinkSecret {
         rng.fill_bytes(&mut nonce);
         let tag = aead::seal(&self.seal_key(), &nonce, labels::LINK_PROVISION, &mut body)?;
 
-        let mut out = Vec::with_capacity(nonce.len() + tag.len() + body.len());
+        let mut out = Vec::with_capacity(
+            nonce
+                .len()
+                .saturating_add(tag.len())
+                .saturating_add(body.len()),
+        );
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&tag);
         out.extend_from_slice(&body);
@@ -521,7 +526,8 @@ impl core::fmt::Debug for Provision {
 
 impl Provision {
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let mut out = Zeroizing::new(alloc::vec![0u8; 1 + 16 + 4 + self.snapshot.len()]);
+        let mut out =
+            Zeroizing::new(alloc::vec![0u8; (1usize + 16 + 4).saturating_add(self.snapshot.len())]);
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
         w.put(&self.from_device)?;
@@ -580,12 +586,12 @@ impl DeviceIdentity {
 
     /// The `DeviceKey`.
     pub fn device_key(&self) -> KeyPair {
-        KeyPair::from_seeds(copy_secret(&self.kem_x), copy_secret(&self.kem_dz))
+        KeyPair::from_seeds(self.kem_x.duplicate(), self.kem_dz.duplicate())
     }
 
     /// The `DeviceRosterKey`.
     pub fn roster_key(&self) -> SigningKey {
-        SigningKey::from_seed(copy_secret(&self.roster_seed))
+        SigningKey::from_seed(self.roster_seed.duplicate())
     }
 
     /// The stored form: 16 + 32 + 32 + 64 + 32 bytes.
@@ -619,13 +625,6 @@ impl DeviceIdentity {
         r.finish()?;
         Ok(identity)
     }
-}
-
-/// A second `Secret` with the bytes of `secret`, written in place.
-fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
-    let mut copy = Secret::zeroed();
-    copy.expose_mut().copy_from_slice(secret.expose());
-    copy
 }
 
 /// SHA3-256 over `parts`, written in a `Secret`.
@@ -691,7 +690,7 @@ pub fn label_bytes(label: &str) -> [u8; LABEL_LEN] {
     let mut out = [0u8; LABEL_LEN];
     let mut end = label.len().min(LABEL_LEN);
     while !label.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
 
     if let (Some(to), Some(from)) = (out.get_mut(..end), label.as_bytes().get(..end)) {
@@ -736,8 +735,9 @@ fn base64url(bytes: &[u8]) -> alloc::string::String {
             chunk.get(2).copied().unwrap_or(0),
         ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for i in 0..=chunk.len() {
-            let index = usize::try_from((n >> (18 - 6 * i)) & 63).unwrap_or(0);
+        let shifts = [18u32, 12, 6, 0];
+        for shift in shifts.into_iter().take(chunk.len().saturating_add(1)) {
+            let index = usize::try_from((n >> shift) & 63).unwrap_or(0);
             out.push(char::from(ALPHABET.get(index).copied().unwrap_or(b'A')));
         }
     }
@@ -751,15 +751,15 @@ fn from_base64url(text: &str) -> Option<Vec<u8>> {
     for c in text.bytes() {
         let value = u32::try_from(ALPHABET.iter().position(|a| *a == c)?).ok()?;
         acc = (acc << 6) | value;
-        bits += 6;
+        bits = bits.saturating_add(6);
         if bits >= 8 {
-            bits -= 8;
+            bits = bits.saturating_sub(8);
             out.push(u8::try_from((acc >> bits) & 0xFF).ok()?);
         }
     }
 
     // One text for one value: the bits after the last byte are zero.
-    if acc & ((1 << bits) - 1) != 0 {
+    if acc & (1u32 << bits).saturating_sub(1) != 0 {
         return None;
     }
     Some(out)

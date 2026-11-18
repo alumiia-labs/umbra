@@ -9,10 +9,8 @@
 //! TLS stack holds already, and the few JSON fields that this needs are read
 //! and written here, thus no crate enters register R3 (Part 14 §14.2.3).
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use crate::clock::unix_now;
+use std::{sync::Arc, time::Duration};
 
 use aws_lc_rs::{rand::SystemRandom, signature::RsaKeyPair};
 use tokio::sync::Mutex;
@@ -128,7 +126,7 @@ fn value_after<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 
 /// Writes a JSON string with its quotes.
 fn json_quote(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
+    let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
 
     for c in text.chars() {
@@ -147,14 +145,14 @@ fn json_quote(text: &str) -> String {
 /// Base64url with no padding (RFC 4648 §5), for a JWT and a data field.
 pub fn base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
 
     for group in bytes.chunks(3) {
         let byte = |i: usize| u32::from(group.get(i).copied().unwrap_or(0));
         let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
         let take = group.len().saturating_add(1);
-        for i in 0..take {
-            let index = usize::try_from((n >> (18 - 6 * i)) & 0x3F).unwrap_or(0);
+        for shift in [18u32, 12, 6, 0].into_iter().take(take) {
+            let index = usize::try_from(n.checked_shr(shift).unwrap_or(0) & 0x3F).unwrap_or(0);
             out.extend(TABLE.get(index).map(|symbol| char::from(*symbol)));
         }
     }
@@ -167,9 +165,9 @@ pub fn base64url(bytes: &[u8]) -> String {
 fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
     let value = |c: u8| -> Option<u32> {
         Some(u32::from(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
+            b'A'..=b'Z' => c.saturating_sub(b'A'),
+            b'a'..=b'z' => c.saturating_sub(b'a').saturating_add(26),
+            b'0'..=b'9' => c.saturating_sub(b'0').saturating_add(52),
             b'+' => 62,
             b'/' => 63,
             _ => return None,
@@ -182,11 +180,13 @@ fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
             .filter(|c| !c.is_ascii_whitespace() && *c != b'='),
     );
 
-    let mut out = Zeroizing::new(Vec::with_capacity(clean.len() * 3 / 4 + 3));
+    let mut out = Zeroizing::new(Vec::with_capacity(
+        (clean.len().saturating_mul(3) / 4).saturating_add(3),
+    ));
     for group in clean.chunks(4) {
         let mut n = 0u32;
-        for (i, c) in group.iter().enumerate() {
-            n |= value(*c)? << (18 - 6 * i);
+        for (c, shift) in group.iter().zip([18u32, 12, 6, 0]) {
+            n |= value(*c)?.checked_shl(shift)?;
         }
         let bytes = n.to_be_bytes();
         out.extend_from_slice(bytes.get(1..group.len())?);
@@ -271,12 +271,6 @@ pub struct Fcm {
     send: Url,
     tls: Arc<rustls::ClientConfig>,
     access: Mutex<Access>,
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 impl Fcm {

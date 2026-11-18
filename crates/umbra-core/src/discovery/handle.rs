@@ -203,7 +203,8 @@ impl Handle {
         nonce: [u8; 24],
         profile: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 1 + 24 + profile.len() + aead::TAG_LEN];
+        let mut out =
+            alloc::vec![0u8; profile.len().saturating_add(const { 1 + 24 + aead::TAG_LEN })];
         let mut w = Writer::new(&mut out);
         w.u8(BLOB_VERSION)?;
         w.put(&nonce)?;

@@ -17,6 +17,7 @@
 //! Each type takes the time and the random values it needs as arguments.
 #![forbid(unsafe_code)]
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 extern crate alloc;
 

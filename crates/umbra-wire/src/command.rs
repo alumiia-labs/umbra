@@ -372,9 +372,11 @@ fn filled_blob<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Error> {
 /// The smallest bucket whose record length holds an invitation blob with
 /// the fields of an `IPUT` before it.
 pub fn blob_bucket(blob_len: usize) -> Option<Bucket> {
-    Bucket::ALL
-        .into_iter()
-        .find(|bucket| LINK_ID_LEN + 2 + blob_len <= bucket.l6_record())
+    Bucket::ALL.into_iter().find(|bucket| {
+        blob_len
+            .checked_add(LINK_ID_LEN + 2)
+            .is_some_and(|need| need <= bucket.l6_record())
+    })
 }
 
 /// The length of an `NPK` payload: the `UMBRA-KEM` public key of the relay.

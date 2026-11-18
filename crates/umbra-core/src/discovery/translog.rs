@@ -62,7 +62,7 @@ pub fn ladder(newest: Option<u32>) -> Vec<(u32, bool)> {
     let mut absent_at = u64::from(u32::MAX) + 1;
 
     for power in 0..=32u32 {
-        let version = (1u64 << power) - 1;
+        let version = (1u64 << power).saturating_sub(1);
         if version > u64::from(u32::MAX) {
             break;
         }
@@ -76,11 +76,11 @@ pub fn ladder(newest: Option<u32>) -> Vec<(u32, bool)> {
     }
 
     while let Some(low) = present_below {
-        if absent_at - low <= 1 {
+        if absent_at.saturating_sub(low) <= 1 {
             break;
         }
 
-        let middle = low + (absent_at - low) / 2;
+        let middle = low.saturating_add(absent_at.saturating_sub(low) / 2);
         steps.push((middle, is_present(middle)));
         if is_present(middle) {
             present_below = Some(middle);
@@ -130,13 +130,17 @@ impl LookupProof {
         let steps_len: usize = self
             .steps
             .iter()
-            .map(|step| vrf::PROOF_LEN + step.prefix.len())
+            .map(|step| vrf::PROOF_LEN.saturating_add(step.prefix.len()))
             .sum();
         let opened_len = self
             .opened
             .as_ref()
-            .map_or(0, |(_, entry)| 34 + entry.len());
-        let len = 1 + 8 + 64 + 1 + self.log_path.len() * 33 + 5 + 1 + steps_len + opened_len;
+            .map_or(0, |(_, entry)| entry.len().saturating_add(34));
+        let len = (1usize + 8 + 64 + 1)
+            .saturating_add(self.log_path.len().saturating_mul(33))
+            .saturating_add(5 + 1)
+            .saturating_add(steps_len)
+            .saturating_add(opened_len);
 
         let mut out = alloc::vec![0u8; len];
         let mut w = Writer::new(&mut out);
@@ -340,17 +344,13 @@ pub struct VersionProof {
 impl VersionProof {
     /// Encodes the proof.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let len = 1
-            + 8
-            + 64
-            + 1
-            + self.log_path.len() * 33
-            + 4
-            + vrf::PROOF_LEN
-            + self.step.prefix.len()
-            + 32
-            + 2
-            + self.entry.len();
+        let len = (1usize + 8 + 64 + 1)
+            .saturating_add(self.log_path.len().saturating_mul(33))
+            .saturating_add(4)
+            .saturating_add(vrf::PROOF_LEN)
+            .saturating_add(self.step.prefix.len())
+            .saturating_add(32 + 2)
+            .saturating_add(self.entry.len());
 
         let mut out = alloc::vec![0u8; len];
         let mut w = Writer::new(&mut out);

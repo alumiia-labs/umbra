@@ -12,11 +12,11 @@ use umbra_core::{
     },
     session::node::ClientNode,
 };
-use umbra_crypto::{hierarchy::RootIdentity, secret::Secret, sign::SigningKey};
-use umbra_ffi::runtime::{run_client, Command, NoStore, OsRng, Update};
+use umbra_crypto::{hex, hierarchy::RootIdentity, secret::Secret, sign::SigningKey};
+use umbra_ffi::runtime::{deadline_after, run_client, Command, NoStore, OsRng, Update};
 use umbra_transport::{https, Dial};
 
-use super::{dial_of, info, relay_set, to_hex, unix_now, Settings};
+use super::{dial_of, info, relay_set, unix_now, Settings};
 
 /// The wait for the probe circuit and its loop.
 const PROBE_WAIT: Duration = Duration::from_secs(120);
@@ -36,11 +36,15 @@ const PROBE_GUARD: u64 = 60;
 /// thus the probe stays `PROBE_GUARD` away from each end of its epoch.
 fn guard_wait(now: u64) -> u64 {
     let into = now % EPOCH_SECONDS;
-    let last = EPOCH_SECONDS - PROBE_GUARD - PROBE_WAIT.as_secs();
+    let last = EPOCH_SECONDS
+        .saturating_sub(PROBE_GUARD)
+        .saturating_sub(PROBE_WAIT.as_secs());
     if into < PROBE_GUARD {
-        PROBE_GUARD - into
+        PROBE_GUARD.saturating_sub(into)
     } else if into > last {
-        EPOCH_SECONDS - into + PROBE_GUARD
+        EPOCH_SECONDS
+            .saturating_sub(into)
+            .saturating_add(PROBE_GUARD)
     } else {
         0
     }
@@ -106,7 +110,7 @@ async fn probe(
     ));
 
     let _ = commands.send(Command::OpenCircuit(*third));
-    let deadline = tokio::time::Instant::now() + PROBE_WAIT;
+    let deadline = deadline_after(PROBE_WAIT);
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let found = loop {
         tokio::select! {
@@ -220,10 +224,12 @@ pub async fn isolate(
 /// of the manifest reads (`REL-083`, `REL-183`).
 pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict, epoch: u64) {
     let line = match verdict {
-        Verdict::Held => format!("held {}", chain.map(|relay| to_hex(&relay)).join(",")),
-        Verdict::Link(LinkVerdict::Contradiction { relay }) => format!("expel {}", to_hex(relay)),
+        Verdict::Held => format!("held {}", chain.map(|relay| hex::write(&relay)).join(",")),
+        Verdict::Link(LinkVerdict::Contradiction { relay }) => {
+            format!("expel {}", hex::write(relay))
+        }
         Verdict::Link(LinkVerdict::LinkFault { from, to }) => {
-            format!("link {} {} {epoch}", to_hex(from), to_hex(to))
+            format!("link {} {} {epoch}", hex::write(from), hex::write(to))
         }
         Verdict::Link(LinkVerdict::Held) => return,
     };

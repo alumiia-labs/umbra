@@ -2113,7 +2113,7 @@ impl Handle {
             OsRng
                 .try_fill_bytes(&mut draw)
                 .map_err(|_| FfiError::Storage)?;
-            let digits = 1_000 + u32::from_be_bytes(draw) % 9_000;
+            let digits = (u32::from_be_bytes(draw) % 9_000).saturating_add(1_000);
             let handle = DirHandle::parse(&format!("@{name}#{digits}"), &username_case_mapped)
                 .map_err(|_| FfiError::Malformed)?;
 

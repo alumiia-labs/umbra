@@ -376,7 +376,7 @@ pub async fn run_transfers(
     // ATT-174: the relays that refused a chunk, which the runs of this
     // handle share, as the fetch orders take them at each start.
     let held = || {
-        let now = crate::runtime::unix_now();
+        let now = crate::clock::unix_now();
         let holds = hold_offs.lock().map_or_else(
             |_| HoldOffs::default(),
             |mut holds| {
@@ -507,7 +507,7 @@ pub async fn run_transfers(
             .any(|transfer| matches!(transfer, Active::Up(upload, _) if upload.has_proofs()));
         let events = tokio::select! {
             received = link.recv() => match received {
-                Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
+                Ok(bytes) => match node.on_capsule(&bytes, crate::clock::unix_now(), &mut rng) {
                     Ok(events) => events,
                     Err(_) => break 'run,
                 },
@@ -546,7 +546,7 @@ pub async fn run_transfers(
             }
             _ = tick.tick() => {
                 // NET-370: a circuit keeps the age that its relays count.
-                let now = crate::runtime::unix_now();
+                let now = crate::clock::unix_now();
                 if let Some(step) = circuit_clock.step(now) {
                     node.circuit_clock_moved(step);
                 }
@@ -628,7 +628,7 @@ pub async fn run_transfers(
 
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends,
                 // and a run with no circuit left ends with it.
-                node.on_tick(crate::runtime::unix_now())
+                node.on_tick(crate::clock::unix_now())
             }
         };
 
@@ -765,7 +765,7 @@ pub async fn run_transfers(
                     };
                     if !refused.is_empty() {
                         if let Ok(mut holds) = hold_offs.lock() {
-                            let now = crate::runtime::unix_now();
+                            let now = crate::clock::unix_now();
                             for (chunk_id, relay_id) in refused {
                                 holds.note(chunk_id, relay_id, now);
                             }

@@ -40,7 +40,7 @@ pub struct IssuerKeyEntry {
 impl IssuerKeyEntry {
     /// Encodes the entry.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 8 + self.public_key.len()];
+        let mut out = alloc::vec![0u8; self.public_key.len().saturating_add(8)];
         let mut w = Writer::new(&mut out);
         w.u16(self.token_type)?;
         w.u32(self.epoch)?;

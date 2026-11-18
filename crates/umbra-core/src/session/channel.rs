@@ -624,7 +624,7 @@ impl OpenedWindow {
             *word = if bits == 0 {
                 high
             } else {
-                (high << bits) | (low >> (64 - bits))
+                (high << bits) | (low >> 64u32.saturating_sub(bits))
             };
         }
     }

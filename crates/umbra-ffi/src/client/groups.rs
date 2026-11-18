@@ -857,7 +857,10 @@ impl Watch {
     /// step of more than `CLOCK_SKEW`, or a clock that went back
     /// (`SCP-019`). The subscription may have ended in that time.
     const fn has_hole(&self, now: u64) -> bool {
-        now < self.beat || now - self.beat > umbra_core::directory::CLOCK_SKEW
+        match now.checked_sub(self.beat) {
+            Some(step) => step > umbra_core::directory::CLOCK_SKEW,
+            None => true,
+        }
     }
 
     /// Starts the watch again at `now` after such a hole: the backlog
@@ -1855,7 +1858,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map(|credentials| credentials.write_secret())
             .collect();
 
-        let now = super::unix_now_seconds();
+        let now = crate::clock::unix_now();
         let mut kept = Vec::new();
         let mut stale = Vec::new();
         let store = &self.open_ref()?.store;
@@ -2029,7 +2032,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .member(group.own_index())
                 .is_some_and(|member| member.active),
             is_unreachable: group.replicas().is_some_and(|held| held.unreachable()),
-            is_clock_suspect: group.holds_clock_suspect(super::unix_now_seconds()),
+            is_clock_suspect: group.holds_clock_suspect(crate::clock::unix_now()),
         })
     }
 
@@ -6217,7 +6220,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // member that another member carries the request for.
         let target = match request.index {
             0 => Some(sender),
-            carried => u16::try_from(carried - 1).ok(),
+            carried => carried
+                .checked_sub(1)
+                .and_then(|index| u16::try_from(index).ok()),
         };
         let Some(target) = target else {
             return;
@@ -6299,17 +6304,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             scope: KeyScope::GroupEpoch,
             id: *group.group_id(),
             epoch,
-            index: u32::from(group.own_index()) + 1,
+            index: u32::from(group.own_index()).saturating_add(1),
         };
         let mut body = [0u8; 64];
         let n = request.encode(&mut body)?;
         let body = body.get(..n).ok_or(Error::Malformed)?.to_vec();
         // WIR-337: the requests to one peer share one rate over each scope.
-        let mut asked = 0;
+        let mut asked = 0usize;
         for contact in self.contacts_in(conversation)? {
             if self.asks_peer(contact, now_ms / 1_000, rng)? {
                 self.send_pairwise_app(contact, AppKind::KeyRequest, &body, now_ms, rng)?;
-                asked += 1;
+                asked = asked.saturating_add(1);
             }
         }
 
@@ -6355,7 +6360,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.is_group(conversation)? || self.group_closed(conversation)? {
             return Ok(());
         }
-        let Ok(target) = u16::try_from(request.index - 1) else {
+        let Some(target) = request
+            .index
+            .checked_sub(1)
+            .and_then(|index| u16::try_from(index).ok())
+        else {
             return Ok(());
         };
 
@@ -8824,7 +8833,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut ended = Vec::new();
         let mut failed = Vec::new();
         let mut sealed = BTreeSet::new();
-        let now = super::unix_now_seconds();
+        let now = crate::clock::unix_now();
         for (row, plain) in self.open_ref()?.store.list(GROUP_UNSENT, None)? {
             let plain = Zeroizing::new(plain);
             let Some((order, mut post, mut arq)) = read_unsent(&plain, row) else {
@@ -9027,7 +9036,7 @@ fn unsent_row(
     arq: &[ReplicaArq; GROUP_REPLICAS],
 ) -> Zeroizing<Vec<u8>> {
     let mut value = Zeroizing::new(Vec::with_capacity(
-        UNSENT_HEAD + GROUP_REPLICAS * REPLICA_ARQ_LEN + post.record.len(),
+        (UNSENT_HEAD + GROUP_REPLICAS * REPLICA_ARQ_LEN).saturating_add(post.record.len()),
     ));
     value.push(UNSENT_ARQ_VERSION);
     value.extend_from_slice(&order.to_be_bytes());
@@ -9093,18 +9102,19 @@ fn read_unsent(
     };
     let mut arq = [ReplicaArq::default(); GROUP_REPLICAS];
     let head = if has_arq {
-        for (index, replica) in arq.iter_mut().enumerate() {
-            let at = head + index * REPLICA_ARQ_LEN;
-            replica.state = *body.get(at)?;
-            replica.attempts = u32::from_be_bytes(body.get(at + 1..at + 5)?.try_into().ok()?);
-            replica.first = u64::from_be_bytes(body.get(at + 5..at + 13)?.try_into().ok()?);
+        let arq_end = head.checked_add(GROUP_REPLICAS * REPLICA_ARQ_LEN)?;
+        let (fields, _) = body.get(head..arq_end)?.as_chunks::<REPLICA_ARQ_LEN>();
+        for (replica, field) in arq.iter_mut().zip(fields) {
+            replica.state = *field.first()?;
+            replica.attempts = u32::from_be_bytes(field.get(1..5)?.try_into().ok()?);
+            replica.first = u64::from_be_bytes(field.get(5..13)?.try_into().ok()?);
         }
 
-        head + GROUP_REPLICAS * REPLICA_ARQ_LEN
+        arq_end
     } else {
         head
     };
-    let take = |from: usize| -> Option<[u8; 32]> { body.get(from..from + 32)?.try_into().ok() };
+    let take = |from: usize| -> Option<[u8; 32]> { body.get(from..)?.get(..32)?.try_into().ok() };
     let order = u64::from_be_bytes(body.get(..8)?.try_into().ok()?);
     let conversation = ConversationId(body.get(8..24)?.try_into().ok()?);
     let is_rotation = *body.get(24)? == 1;
@@ -9117,7 +9127,7 @@ fn read_unsent(
     let replica = |at: usize| -> Option<GroupReplica> {
         Some(GroupReplica {
             relay: take(at)?,
-            group_queue_id: take(at + 32)?,
+            group_queue_id: take(at.checked_add(32)?)?,
         })
     };
     let replicas = [replica(90)?, replica(154)?];

@@ -83,7 +83,7 @@ pub struct MeasurerCert<'a> {
 }
 
 fn cert_preimage(measurer_id: &[u8; 16], mldsa_pk: &[u8], not_after: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(labels::MEASURER_CERT.len() + CERT_FIXED_LEN);
+    let mut out = Vec::with_capacity(const { labels::MEASURER_CERT.len() + CERT_FIXED_LEN });
     out.extend_from_slice(labels::MEASURER_CERT);
     out.push(0x01);
     out.extend_from_slice(measurer_id);
@@ -295,8 +295,8 @@ pub struct ClassResult {
 
 fn hex_digit(byte: u8) -> Option<u8> {
     match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'0'..=b'9' => byte.checked_sub(b'0'),
+        b'a'..=b'f' => byte.checked_sub(b'a' - 10),
         _ => None,
     }
 }
@@ -381,7 +381,7 @@ pub fn verified_class(relay_id: &[u8; 32], declared: u8, results: &[ClassResult]
     match lowest_failed {
         None => Some(declared.min(3)),
         Some(0) => None,
-        Some(failed) => Some(declared.min(failed - 1)),
+        Some(failed) => Some(declared.min(failed.saturating_sub(1))),
     }
 }
 

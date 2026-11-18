@@ -37,6 +37,7 @@
 //! a test network alone.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{collections::BTreeMap, process::ExitCode};
 
@@ -51,7 +52,7 @@ use umbra_core::{
     notify::seeded_pair,
 };
 use umbra_crypto::{
-    kem::KeyPair, ohttp, rsabssa::SecretKey2048, secret::Secret, sign::SigningKey,
+    hex, kem::KeyPair, ohttp, rsabssa::SecretKey2048, secret::Secret, sign::SigningKey,
     zeroize::Zeroizing,
 };
 use umbra_relay::{
@@ -66,32 +67,10 @@ const STACK_BYTES: usize = 16 << 20;
 
 /// Reads a seed of 64 hex characters. It leaves no copy in memory.
 fn hex32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
-    if text.len() != 64 {
-        return None;
-    }
-
     let mut out = Zeroizing::new([0u8; 32]);
-    for (at, slot) in out.iter_mut().enumerate() {
-        let start = at.checked_mul(2)?;
-        *slot = u8::from_str_radix(text.get(start..start.checked_add(2)?)?, 16).ok()?;
-    }
+    hex::read_into(text, out.as_mut_slice())?;
 
     Some(out)
-}
-
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect()
-}
-
-fn hex_text(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn settings(text: &str) -> BTreeMap<&str, &str> {
@@ -214,7 +193,7 @@ async fn run() -> ExitCode {
                 return ExitCode::from(2);
             };
 
-            println!("{}", hex_text(&signed));
+            println!("{}", hex::write(&signed));
             return ExitCode::SUCCESS;
         }
     }
@@ -269,7 +248,7 @@ async fn run() -> ExitCode {
     if let Some(chain) = values.get("keyset_chain") {
         let chain: Option<Vec<Vec<u8>>> = chain
             .split(',')
-            .map(|text| hex_bytes(text.trim()))
+            .map(|text| hex::read_vec(text.trim()))
             .collect();
 
         if chain
@@ -293,7 +272,7 @@ async fn run() -> ExitCode {
             return ExitCode::from(1);
         };
 
-        println!("{}", hex_text(&bytes));
+        println!("{}", hex::write(&bytes));
         return ExitCode::SUCCESS;
     }
 

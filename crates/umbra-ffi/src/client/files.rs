@@ -326,7 +326,11 @@ impl FileExtras {
 fn state_row(state: FileState, shape: &Shape, size: u64, extras: &FileExtras) -> Vec<u8> {
     let name = extras.name.as_deref().map_or(&[][..], str::as_bytes);
     let preview = extras.preview.as_deref().unwrap_or(&[]);
-    let mut row = Vec::with_capacity(STATE_ROW_LEN + 10 + name.len() + preview.len());
+    let mut row = Vec::with_capacity(
+        (STATE_ROW_LEN + 10)
+            .saturating_add(name.len())
+            .saturating_add(preview.len()),
+    );
     row.push(state as u8);
     row.push(shape.mime_class);
     row.extend_from_slice(&shape.pixel_w.to_be_bytes());
@@ -374,7 +378,7 @@ fn extras_of_state_row(row: &[u8]) -> FileExtras {
         .get(..2)
         .and_then(|len| <[u8; 2]>::try_from(len).ok())
         .map(|len| usize::from(u16::from_be_bytes(len)))
-        .and_then(|len| rest.get(2..2 + len))
+        .and_then(|len| rest.get(2..)?.get(..len))
         .filter(|preview| !preview.is_empty())
         .map(<[u8]>::to_vec);
     FileExtras { name, preview }

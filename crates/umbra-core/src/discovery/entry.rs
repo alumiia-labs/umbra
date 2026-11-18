@@ -51,7 +51,9 @@ impl DirectoryEntry {
 
     /// The encoded length.
     pub fn len(&self) -> usize {
-        1 + self.handle.len() + ENTRY_PK_LEN + address::LEN + 4
+        self.handle
+            .len()
+            .saturating_add(const { 1 + ENTRY_PK_LEN + address::LEN + 4 })
     }
 
     /// Whether the handle is empty, which no entry allows. Clippy asks for

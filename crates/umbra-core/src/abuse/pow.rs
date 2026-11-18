@@ -74,7 +74,8 @@ impl PowChallenge {
 
     /// The signed preimage: the label and the bytes before `sig`.
     pub fn preimage(&self) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; labels::POW_CHALLENGE.len() + CHALLENGE_SIGNED_LEN];
+        let mut out =
+            alloc::vec![0u8; const { labels::POW_CHALLENGE.len() + CHALLENGE_SIGNED_LEN }];
         let mut w = Writer::new(&mut out);
         w.put(labels::POW_CHALLENGE)?;
         self.write_signed(&mut w)?;
@@ -552,7 +553,7 @@ impl ChunkAdmissions {
 
         if let Some((solution, left)) = self.held.get_mut(&key) {
             if *left > 0 {
-                *left -= 1;
+                *left = left.saturating_sub(1);
                 return Made::Solution(*solution);
             }
         }

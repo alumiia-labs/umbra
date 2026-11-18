@@ -69,11 +69,11 @@ struct Chain {
 /// above 0.
 fn draw_below<R: CryptoRng + ?Sized>(count: u32, rng: &mut R) -> u32 {
     // The draws at or above the last whole multiple of `count` go again.
-    let limit = u32::MAX - u32::MAX % count;
+    let limit = u32::MAX.saturating_sub(u32::MAX.checked_rem(count).unwrap_or(0));
     loop {
         let draw = rng.next_u32();
         if draw < limit {
-            return draw % count;
+            return draw.checked_rem(count).unwrap_or(0);
         }
     }
 }

@@ -10,6 +10,7 @@
 //! exists between two of them (`WIR-009`, `WIR-010`).
 #![forbid(unsafe_code)]
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 extern crate alloc;
 

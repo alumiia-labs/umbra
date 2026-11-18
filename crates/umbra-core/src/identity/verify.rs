@@ -110,7 +110,7 @@ impl Ceremony {
     /// went back before that arrival. A start with no time does not lapse.
     pub fn asked_start_at(&self, now: u64) -> Option<[u8; 32]> {
         match self.asked_at {
-            Some(at) if now < at || now - at >= HELD_START_LIFE => None,
+            Some(at) if now.checked_sub(at).is_none_or(|age| age >= HELD_START_LIFE) => None,
             _ => self.asked,
         }
     }

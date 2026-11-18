@@ -12,10 +12,11 @@
 //! two workers owns the client node and the socket, and a task of it gives
 //! each update to the client under the lock of the handle.
 
+use crate::clock::{unix_now, unix_now_ms};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use tokio::sync::{mpsc, oneshot};
@@ -37,6 +38,7 @@ use umbra_core::{
     store::wrap::{Cost, SecureElement, WrapHeader, M_KIB_FLOOR, T_FLOOR},
 };
 use umbra_crypto::handshake::nk::RelayStatic;
+use umbra_crypto::hex;
 use umbra_transport::{
     https::Url,
     native::{self, NativeError},
@@ -62,18 +64,6 @@ use crate::{
     transfers::{run_transfers, TransferCommand, TransferUpdate},
     ConversationId, Delivery, Error, Event, MsgRef, Sink,
 };
-
-fn unix_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
-}
-
-fn unix_now() -> u64 {
-    unix_now_ms() / 1_000
-}
 
 /// The width of a `QueueAddress` in a report queue of [`Network`].
 const REPORT_ADDRESS_LEN: usize = 129;
@@ -769,10 +759,6 @@ fn random_u64() -> u64 {
     u64::from_be_bytes(bytes)
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// The relays of a verified set in the form of a network. A relay with no
 /// IPv4 address stays out, because this client dials IPv4 alone.
 fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
@@ -787,8 +773,8 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
             relay_id: relay.candidate.relay_id.to_vec(),
             layer: relay.candidate.layer,
             // The two values are opaque, and a network compares them alone.
-            operator: to_hex(&relay.candidate.operator_id),
-            family: Some(to_hex(&relay.candidate.family_id)),
+            operator: hex::write(&relay.candidate.operator_id),
+            family: Some(hex::write(&relay.candidate.family_id)),
             country: String::from_utf8_lossy(&relay.jurisdiction).into_owned(),
             asn: relay.candidate.asn,
             prefix: None,
@@ -832,17 +818,6 @@ fn dial_order(pins: &[[u8; 32]], entries: &[RelayEntry<'_>], uses_second: bool) 
 const DESCRIPTOR_HEADER: &str = "umbra-network 2";
 const DESCRIPTOR_HEADER_V1: &str = "umbra-network 1";
 
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    // `from_str_radix` takes a sign, which is no hex digit.
-    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect()
-}
-
 /// Reads a network descriptor: the text that an operator of a test network
 /// gives to a tester. The relay directory of Part 10 replaces it later.
 ///
@@ -879,7 +854,7 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
             ["relay", host, address, port, static_key, relay_id, facts @ ..] => {
                 let address: std::net::Ipv4Addr =
                     address.parse().map_err(|_| FfiError::Malformed)?;
-                let key = |text: &str| hex_bytes(text).filter(|bytes| bytes.len() == 32);
+                let key = |text: &str| hex::read_vec(text).filter(|bytes| bytes.len() == 32);
                 let mut relay = RelayEndpoint {
                     host: (*host).to_owned(),
                     ipv4: address.octets().to_vec(),
@@ -1582,6 +1557,28 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "sockets-test")]
+impl Handle {
+    /// Stores a contact with no channel, and gives its conversation. A test
+    /// of the surface with no network has no other way to a conversation
+    /// that the store holds.
+    #[doc(hidden)]
+    pub fn stored_contact_for_test(&self, contact: [u8; 32]) -> Result<Vec<u8>, FfiError> {
+        use umbra_core::session::node::{shadow_contact_state, ContactId, StateChange};
+
+        let change = StateChange::Contact {
+            contact: ContactId(contact),
+            state: zeroize::Zeroizing::new(shadow_contact_state(&[0; 16])),
+        };
+        let mut inner = locked(&self.inner);
+        inner
+            .client
+            .commit_network(&[change], &[], unix_now_ms(), &mut OsRng)?;
+
+        Ok(inner.client.conversation_for(&contact)?.0.to_vec())
+    }
 }
 
 #[uniffi::export]
@@ -2443,12 +2440,12 @@ impl Inner {
         // after the backoff of this device.
         if let Ok(due) = self
             .client
-            .groups_to_rotate(crate::runtime::unix_now().saturating_mul(1_000), &mut OsRng)
+            .groups_to_rotate(crate::clock::unix_now().saturating_mul(1_000), &mut OsRng)
         {
             for conversation in due {
                 let _ = self.client.rotate_group(
                     conversation,
-                    crate::runtime::unix_now().saturating_mul(1_000),
+                    crate::clock::unix_now().saturating_mul(1_000),
                     &mut OsRng,
                 );
             }
@@ -2456,7 +2453,7 @@ impl Inner {
 
         // §11.9.7: a quiet week gives one presence record, and an admin
         // removes a member that stayed silent for `GROUP_SILENT_EVICT`.
-        let now_ms = crate::runtime::unix_now().saturating_mul(1_000);
+        let now_ms = crate::clock::unix_now().saturating_mul(1_000);
         if let Ok(due) = self.client.groups_owing_presence(now_ms, &mut OsRng) {
             for conversation in due {
                 let _ = self.client.post_presence(conversation, now_ms, &mut OsRng);
@@ -2545,7 +2542,7 @@ impl Inner {
 
         // NTF-090, NTF-104: each group with no notify queue, or with one
         // past its rotation, gets a new one from the run of the queues.
-        let now_s = crate::runtime::unix_now();
+        let now_s = crate::clock::unix_now();
         if let (Ok(groups), Some(running)) =
             (self.client.groups_without_notify(now_s), &self.bridge)
         {
@@ -2610,7 +2607,7 @@ impl Inner {
         // NET-271: a send counts against the ARQ of its replica when the
         // group task took its command, and not before.
         let mut counted = BTreeMap::new();
-        let now = crate::runtime::unix_now();
+        let now = crate::clock::unix_now();
         while let Some(job) = self.client.take_group_post() {
             // GRP-194: the same record goes to each replica, each under its
             // own tag, and the first `GSEQ` accepts it (`GRP-195`). A replica
@@ -2635,8 +2632,11 @@ impl Inner {
                     tag,
                     relay: replica.relay,
                     group_queue_id: replica.group_queue_id,
-                    write: crate::runtime::copy_secret(&job.write),
-                    fallback: job.fallback.as_ref().map(crate::runtime::copy_secret),
+                    write: job.write.duplicate(),
+                    fallback: job
+                        .fallback
+                        .as_ref()
+                        .map(umbra_crypto::secret::Secret::duplicate),
                     record: job.record.clone(),
                 });
             }
@@ -2794,7 +2794,7 @@ impl Inner {
         // from the order of the set, which would put each group of each
         // client on the same two relays.
         let ordered = umbra_core::directory::path::weighted_order(&pool, &mut |bound| {
-            random_u64() % bound.max(1)
+            random_u64().checked_rem(bound).unwrap_or(0)
         });
         let candidates: Vec<GroupRelay> = ordered
             .iter()
@@ -3065,7 +3065,7 @@ impl Inner {
                 }),
             ) = (&update, sent)
             {
-                let now = crate::runtime::unix_now();
+                let now = crate::clock::unix_now();
                 let payment = match self.client.take_token(umbra_core::abuse::epoch_number(now)) {
                     Ok(Some(token)) => Payment::Token(token),
                     _ => Payment::Work,
@@ -3172,7 +3172,7 @@ impl Inner {
                     &group_queue_id,
                     seq,
                     &record,
-                    crate::runtime::unix_now().saturating_mul(1_000),
+                    crate::clock::unix_now().saturating_mul(1_000),
                     &mut OsRng,
                 );
                 self.pump_epoch_transfers();
@@ -3282,7 +3282,7 @@ impl Inner {
                         settled.conversation,
                         settled.which,
                         &settled.queue,
-                        crate::runtime::unix_now(),
+                        crate::clock::unix_now(),
                         &mut OsRng,
                     );
                 }
@@ -3550,7 +3550,7 @@ impl Inner {
                 let tag = self.next_tag(TransferWork::DeadWrite {
                     conversation,
                     week,
-                    cred: crate::runtime::copy_secret(&cred),
+                    cred: cred.duplicate(),
                 });
                 self.send_transfer(TransferCommand::WriteHandle {
                     tag,
@@ -3957,7 +3957,10 @@ impl Inner {
                     // A view moves in steps of 5 %, thus a large file makes
                     // twenty events and not one for each chunk.
                     let step = |done: u32, total: u32| {
-                        u64::from(done).saturating_mul(20) / u64::from(total.max(1))
+                        u64::from(done)
+                            .saturating_mul(20)
+                            .checked_div(u64::from(total.max(1)))
+                            .unwrap_or(0)
                     };
                     let before = file_progress.insert(*message, (done, total));
                     if before.is_none_or(|(was, _)| step(was, total) != step(done, total)) {
@@ -5535,7 +5538,8 @@ impl Persist for HandleStore {
             .map(|(conversation, _)| *conversation)
             .collect();
         let open = inner.client.gossip_contacts(&all).ok()?;
-        let pick = usize::try_from(random_u64() % u64::try_from(open.len()).ok()?.max(1)).ok()?;
+        let count = u64::try_from(open.len()).ok()?;
+        let pick = usize::try_from(random_u64().checked_rem(count).unwrap_or(0)).ok()?;
         let conversation = open.get(pick)?;
         let contact = inner.bridge.as_ref()?.contact_for(conversation)?;
         self.given = Some(Given::Digest(source));
@@ -6350,7 +6354,7 @@ impl Handle {
             .map(|relay| relay.candidate)
             .collect();
         let eligible = umbra_core::directory::path::weighted_order(&pool, &mut |bound| {
-            random_u64() % bound.max(1)
+            random_u64().checked_rem(bound).unwrap_or(0)
         });
 
         let mut pins = inner.client.ingress_pins()?;
@@ -9162,10 +9166,10 @@ mod tests {
 
     #[test]
     fn a_sign_is_no_hex_digit() {
-        assert_eq!(hex_bytes("0aFf"), Some(vec![0x0A, 0xFF]));
-        assert_eq!(hex_bytes("+f"), None);
-        assert_eq!(hex_bytes("-1"), None);
-        assert_eq!(hex_bytes("abc"), None);
+        assert_eq!(hex::read_vec("0aFf"), Some(vec![0x0A, 0xFF]));
+        assert_eq!(hex::read_vec("+f"), None);
+        assert_eq!(hex::read_vec("-1"), None);
+        assert_eq!(hex::read_vec("abc"), None);
     }
 
     #[test]

@@ -208,13 +208,6 @@ fn notifier_secret_of(root: &Secret<32>, recipient_id: &[u8; 32]) -> Result<Secr
     Ok(secret)
 }
 
-/// A copy of a secret that passes through no plain array.
-fn copy_secret(held: &Secret<32>) -> Secret<32> {
-    let mut copy = Secret::zeroed();
-    copy.expose_mut().copy_from_slice(held.expose());
-    copy
-}
-
 /// A random secret, drawn straight into the secret.
 fn random_secret<R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<32> {
     let mut secret = Secret::zeroed();
@@ -576,7 +569,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
             NdrRequest::Unregister {
                 handle: timer.handle,
-                removal: copy_secret(&timer.removal),
+                removal: timer.removal.duplicate(),
             }
             .encode(&mut out)
             .map_err(|_| Error::Malformed)?;
@@ -602,13 +595,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let removal = if advances {
             next_removal(&timer.removal)
         } else {
-            copy_secret(&timer.removal)
+            timer.removal.duplicate()
         };
         NdrRequest::Timer {
             handle: timer.handle,
             token: &plain,
             removal_hash: sha3_256(&[removal.expose()]),
-            prior: copy_secret(&timer.removal),
+            prior: timer.removal.duplicate(),
         }
         .encode(&mut out)
         .map_err(|_| Error::Malformed)?;
@@ -859,7 +852,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .iter()
                     .find(|relay| relay.relay_id == group.relay_id)
                     .filter(|relay| relay.root.expose() != &[0; 32])
-                    .map(|relay| copy_secret(&relay.root));
+                    .map(|relay| relay.root.duplicate());
             }
         }
 
@@ -1432,7 +1425,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Unregister {
                         handle: group.handle,
-                        removal: copy_secret(&group.removal),
+                        removal: group.removal.duplicate(),
                     }
                     .encode(&mut out)
                     .map_err(|_| Error::Malformed)?;
@@ -1464,11 +1457,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // the NDR reads it for a handle that it holds, thus a
                     // first registration whose answer was lost goes again.
                     let advances = state == STALE;
-                    let prior = copy_secret(&group.removal);
+                    let prior = group.removal.duplicate();
                     let removal = if advances {
                         next_removal(&group.removal)
                     } else {
-                        copy_secret(&group.removal)
+                        group.removal.duplicate()
                     };
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Register {
@@ -1494,7 +1487,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Unregister {
                         handle: group.handle,
-                        removal: copy_secret(&group.removal),
+                        removal: group.removal.duplicate(),
                     }
                     .encode(&mut out)
                     .map_err(|_| Error::Malformed)?;

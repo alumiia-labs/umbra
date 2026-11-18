@@ -70,6 +70,7 @@
 //! ```
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 mod isolation;
 mod stats;
@@ -81,6 +82,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use umbra_ffi::clock::unix_now;
 
 use tokio::sync::mpsc;
 use umbra_core::{
@@ -98,6 +100,7 @@ use umbra_core::{
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hash::sha3_256,
+    hex,
     hierarchy::RootIdentity,
     seal,
     secret::Secret,
@@ -162,35 +165,12 @@ struct Settings {
     host_alias: Option<[u8; 4]>,
 }
 
-/// Writes the 32 bytes of 64 hex characters to `out`. `from_str_radix`
-/// takes a sign, thus each character is checked first: `+f` is no byte.
-fn hex_into(text: &str, out: &mut [u8; 32]) -> Option<()> {
-    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(())
-}
-
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    let mut out = [0u8; 32];
-    hex_into(text, &mut out)?;
-    Some(out)
-}
-
 /// A secret of 32 bytes from hex. The bytes go into the secret with no
 /// copy that stays.
 fn secret32(text: &str) -> Option<Secret<32>> {
     let mut secret = Secret::<32>::zeroed();
-    hex_into(text, secret.expose_mut())?;
+    hex::read_into(text, secret.expose_mut())?;
     Some(secret)
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Reads a secret of 32 bytes from its file in hex. On a Unix system a
@@ -236,7 +216,7 @@ fn secret_at(path: &std::path::Path) -> Option<Secret<32>> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let text = zeroize::Zeroizing::new(to_hex(secret.expose()));
+    let text = zeroize::Zeroizing::new(hex::write(secret.expose()));
     let mut file = options.open(path).ok()?;
     std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
     file.sync_all().ok()?;
@@ -271,7 +251,7 @@ fn read_settings(path: &str) -> Option<Settings> {
             )
         }
         (None, Some(seed)) => (
-            KeySource::TestSeed(hex32(seed)?),
+            KeySource::TestSeed(hex::read_array::<32>(seed)?),
             secret32(values.get("root_seed")?)?,
             secret32(values.get("report_seed")?)?,
         ),
@@ -359,12 +339,6 @@ fn write_whole(path: &std::path::Path, bytes: &[u8], is_private: bool) -> std::i
     file.sync_all()?;
     drop(file);
     std::fs::rename(&part, path)
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The key of the authority `index`: from the seed of the test authorities
@@ -599,7 +573,7 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
                 return;
             };
             let Some(chains) = stats::chain_count(&settings, listed, epoch).await else {
-                println!("no chain count for {} in epoch {epoch}", to_hex(&relay));
+                println!("no chain count for {} in epoch {epoch}", hex::write(&relay));
                 return;
             };
 
@@ -608,13 +582,13 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
             let rate = f64::from(reports) / chains.max(1) as f64;
             println!(
                 "fault rate {} epoch={epoch} reports={reports} chains={chains} rate={rate:.3}",
-                to_hex(&relay)
+                hex::write(&relay)
             );
             if rate < RELAY_FAULT_RATE {
                 return;
             }
 
-            println!("isolation query on {}", to_hex(&relay));
+            println!("isolation query on {}", hex::write(&relay));
             match isolation::isolate(&settings, &key, chain).await {
                 Ok((verdict, epoch)) => isolation::record(&settings, &chain, &verdict, epoch),
                 Err(cause) => eprintln!("the isolation query failed: {cause}"),
@@ -740,11 +714,11 @@ async fn run_once(
                     "report queue refused: {reason:?}, the next NEW goes in {} s",
                     after.as_secs()
                 );
-                again = Some(tokio::time::Instant::now() + after);
+                again = Some(umbra_ffi::runtime::deadline_after(after));
             }
             Update::LinkFault(sealed) => match LinkFaultReport::open(report_sk, &sealed) {
                 Ok(report) => {
-                    reports.opened += 1;
+                    reports.opened = reports.opened.saturating_add(1);
 
                     // REL-170: a report of the current epoch or the one
                     // before it counts, and each other goes.
@@ -752,11 +726,11 @@ async fn run_once(
                     let is_current =
                         report.epoch == epoch || report.epoch.saturating_add(1) == epoch;
                     if is_current && count_report(counts, &listed, &report) {
-                        reports.counted += 1;
+                        reports.counted = reports.counted.saturating_add(1);
                     }
                 }
                 // REL-170: a report that does not open goes.
-                Err(_) => reports.unopened += 1,
+                Err(_) => reports.unopened = reports.unopened.saturating_add(1),
             },
             Update::Offline(ended) => {
                 println!("authority offline: {ended:?}");
@@ -773,15 +747,20 @@ async fn run_once(
 
 /// The three relays of a chain in hex, the ingress first.
 fn read_chain(text: &str) -> Option<[[u8; 32]; 3]> {
-    let relays: Vec<[u8; 32]> = text.split(',').map(hex32).collect::<Option<_>>()?;
+    let relays: Vec<[u8; 32]> = text
+        .split(',')
+        .map(hex::read_array::<32>)
+        .collect::<Option<_>>()?;
     relays.try_into().ok()
 }
 
 /// Prints the noised chain count of one relay in one epoch (§10.8).
 fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
-    let (Some(settings), Some(relay), Ok(epoch)) =
-        (read_settings(path), hex32(relay), epoch.parse::<u64>())
-    else {
+    let (Some(settings), Some(relay), Ok(epoch)) = (
+        read_settings(path),
+        hex::read_array::<32>(relay),
+        epoch.parse::<u64>(),
+    ) else {
         eprintln!("usage: umbra-authority <settings file> count <relay> <epoch>");
         return ExitCode::from(2);
     };
@@ -808,7 +787,7 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
 
         match stats::chain_count(&settings, listed, epoch).await {
             Some(count) => {
-                println!("chains {} epoch={epoch} noised={count}", to_hex(&relay));
+                println!("chains {} epoch={epoch} noised={count}", hex::write(&relay));
                 ExitCode::SUCCESS
             }
             None => {
@@ -955,8 +934,8 @@ mod tests {
 
     #[test]
     fn a_hex_value_with_a_sign_is_no_value() {
-        assert_eq!(hex32(&"0f".repeat(32)), Some([0x0f; 32]));
-        assert_eq!(hex32(&"+f".repeat(32)), None);
+        assert_eq!(hex::read_array::<32>(&"0f".repeat(32)), Some([0x0f; 32]));
+        assert_eq!(hex::read_array::<32>(&"+f".repeat(32)), None);
         assert!(secret32(&"+f".repeat(32)).is_none());
     }
 

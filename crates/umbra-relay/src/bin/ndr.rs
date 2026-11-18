@@ -27,12 +27,13 @@
 //! token. An `fcm_api` line names another API than FCM, for a test.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{collections::BTreeMap, process::ExitCode};
 
 use tokio::net::TcpListener;
 use umbra_core::notify::seeded_pair;
-use umbra_crypto::{kem::KeyPair, ohttp, zeroize::Zeroizing};
+use umbra_crypto::{hex, kem::KeyPair, ohttp, zeroize::Zeroizing};
 use umbra_relay::{
     fcm::{Fcm, ServiceAccount, FCM_API},
     ndr_server::{run_ndr, Gateway, NdrStore, SqliteNdrStore},
@@ -42,15 +43,8 @@ use umbra_transport::native;
 
 /// Reads a seed of 64 hex characters. It leaves no copy in memory.
 fn hex32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
-    if text.len() != 64 {
-        return None;
-    }
-
     let mut out = Zeroizing::new([0u8; 32]);
-    for (at, slot) in out.iter_mut().enumerate() {
-        let start = at.checked_mul(2)?;
-        *slot = u8::from_str_radix(text.get(start..start.checked_add(2)?)?, 16).ok()?;
-    }
+    hex::read_into(text, out.as_mut_slice())?;
 
     Some(out)
 }

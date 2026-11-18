@@ -10,6 +10,7 @@
 //! browser in the web crate.
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "native"), no_std)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 extern crate alloc;
 

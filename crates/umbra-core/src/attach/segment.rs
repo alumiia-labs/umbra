@@ -24,7 +24,10 @@ pub const fn padded_len(plain_len: usize, unit: usize) -> usize {
 
 /// The count of units after the padding.
 pub const fn unit_count(plain_len: usize, unit: usize) -> usize {
-    padded_len(plain_len, unit) / unit
+    match padded_len(plain_len, unit).checked_div(unit) {
+        Some(count) => count,
+        None => 0,
+    }
 }
 
 /// The segment count of a file of `plain_len` bytes.

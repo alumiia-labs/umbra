@@ -111,7 +111,12 @@ fn suite_id<K: KemSuite, H: KdfHash>() -> [u8; 10] {
 
 /// `LabeledExtract(salt, label, ikm)` as a PRK.
 fn labeled_extract<H: KdfHash>(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Vec<u8> {
-    let mut labeled = Vec::with_capacity(7 + suite.len() + label.len() + ikm.len());
+    let mut labeled = Vec::with_capacity(
+        7usize
+            .saturating_add(suite.len())
+            .saturating_add(label.len())
+            .saturating_add(ikm.len()),
+    );
     labeled.extend_from_slice(b"HPKE-v1");
     labeled.extend_from_slice(suite);
     labeled.extend_from_slice(label);
@@ -164,7 +169,11 @@ impl Context {
         let suite = suite_id::<K, H>();
         let psk_id_hash = labeled_extract::<H>(&suite, b"", b"psk_id_hash", b"");
         let info_hash = labeled_extract::<H>(&suite, b"", b"info_hash", info);
-        let mut context = Vec::with_capacity(1 + psk_id_hash.len() + info_hash.len());
+        let mut context = Vec::with_capacity(
+            1usize
+                .saturating_add(psk_id_hash.len())
+                .saturating_add(info_hash.len()),
+        );
         context.push(MODE_BASE);
         context.extend_from_slice(&psk_id_hash);
         context.extend_from_slice(&info_hash);

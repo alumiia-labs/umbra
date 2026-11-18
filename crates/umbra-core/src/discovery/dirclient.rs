@@ -211,7 +211,7 @@ pub fn evaluate_request<R: TryCryptoRng + ?Sized>(
         }
     };
 
-    let mut body = vec![0u8; admission.len() + 32];
+    let mut body = vec![0u8; admission.len().saturating_add(32)];
     let used = admission.encode(&mut body)?;
     body.truncate(used);
     body.extend_from_slice(&blinded);

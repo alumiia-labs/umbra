@@ -7,6 +7,7 @@
 //! [`Client::take_outgoing`] and gives each received record to
 //! [`Client::receive`], and the platform sees handles and events only.
 
+use crate::clock::unix_now;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -856,14 +857,6 @@ fn held_receipt(
 /// kind.
 fn held_receipt_key(conversation: ConversationId, kind: AppKind, target: &[u8; 16]) -> Vec<u8> {
     [conversation.0.as_slice(), &[kind as u8], target].concat()
-}
-
-/// The clock in seconds, for a rule of the store that runs on no call of
-/// the caller.
-fn unix_now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// Writes the delivery state of a stored message.
@@ -3160,6 +3153,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(out)
     }
 
+    /// Whether the store holds `conversation`: a contact or a group. A sync
+    /// channel of Part 7 `DEV-286` is no conversation.
+    fn holds_conversation(&self, conversation: ConversationId) -> Result<bool, Error> {
+        if self.is_group(conversation)? {
+            return Ok(true);
+        }
+
+        let store = &self.open_ref()?.store;
+        let Some(plain) = store.get(TableId::CONTACT, &conversation.0)? else {
+            return Ok(false);
+        };
+        drop(Zeroizing::new(plain));
+
+        Ok(!self.device_peers()?.contains(&conversation))
+    }
+
     /// The idle time of the auto-lock, in seconds. Zero means that the
     /// platform locks when the app leaves the screen. With no stored value
     /// the default of `IMP-119` holds.
@@ -4665,8 +4674,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let name = [RECEIPT_SETTING, conversation.0.as_slice()].concat();
         let row = open.store.row_id(SETTINGS, &name);
-        let flags =
-            (u8::from(settings.delivery) * SENDS_DELIVERY) | (u8::from(settings.read) * SENDS_READ);
+        let delivery = if settings.delivery { SENDS_DELIVERY } else { 0 };
+        let read = if settings.read { SENDS_READ } else { 0 };
+        let flags = delivery | read;
         let mut ended = Vec::new();
         for (held, plain) in open.store.list(RECEIPT, Some(&conversation.0))? {
             let kind = plain.get(RECEIPT_KIND).copied();
@@ -5136,9 +5146,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        let conversation = draft.conversation();
+        // A row for a conversation that the store does not hold would show
+        // in no view and would stay in the outbox.
+        if !self.holds_conversation(conversation)? {
+            return Err(Error::NotFound);
+        }
+
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
-        let conversation = draft.conversation();
         if let Some(file) = draft.file() {
             // The record of a file answers nothing, and its text is a
             // caption of CAPTION_MAX at most (WIR-535).
@@ -5649,7 +5665,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if delivery == Delivery::Failed && is_notice {
             let mut draw = [0u8; 8];
             rng.fill_bytes(&mut draw);
-            let due = unix_now_seconds().saturating_add(
+            let due = unix_now().saturating_add(
                 umbra_core::identity::keychange::sweep_delay(u64::from_be_bytes(draw)).max(1),
             );
             let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;

@@ -113,15 +113,14 @@ impl WakeTable {
             return Err(Error::Malformed);
         }
 
-        let size = 1
-            + 2
-            + self.roots.len() * 32
-            + 2
-            + self.aliases.len() * 32
-            + 2
-            + self.muted.len() * 24
-            + 2
-            + self.priority.len() * 16;
+        let size = (1usize + 2)
+            .saturating_add(self.roots.len().saturating_mul(32))
+            .saturating_add(2)
+            .saturating_add(self.aliases.len().saturating_mul(32))
+            .saturating_add(2)
+            .saturating_add(self.muted.len().saturating_mul(24))
+            .saturating_add(2)
+            .saturating_add(self.priority.len().saturating_mul(16));
         // The roots wipe themselves on an error. The plain `Vec` of the
         // result stays for the callers.
         let mut out = Zeroizing::new(alloc::vec![0u8; size]);

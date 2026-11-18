@@ -10,6 +10,7 @@
 //! clock of the server pushes to it once in each `PERIODIC_INTERVAL`
 //! (`NTF-150`).
 
+use crate::clock::unix_now;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
@@ -612,13 +613,6 @@ const TICK_LATE_MAX: u64 = 60;
 /// The ticks at the provider at once. One million timers make about 560
 /// ticks in each second, and a post takes a fraction of a second.
 const TICKS_AT_ONCE: usize = 256;
-
-/// The time now, in seconds.
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
 
 struct State {
     ndr: Ndr,

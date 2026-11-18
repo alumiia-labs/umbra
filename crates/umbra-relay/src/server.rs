@@ -3,6 +3,7 @@
 //! task. The node stays a plain state machine, thus this file holds the
 //! clock, the random source, and the sockets, and no protocol rule.
 
+use crate::clock::unix_now;
 use std::{
     cell::Cell,
     cmp::Reverse,
@@ -13,7 +14,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
@@ -400,12 +401,6 @@ impl Adopted {
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
 /// The inputs that one commit of the store serves at most (`NET-298`). The
 /// node task takes each input that waits after the first one, up to this
 /// count, and commits their changes together. Before this, each input took
@@ -605,6 +600,12 @@ fn send_outputs(
     }
 }
 
+/// The time `wait` after `at`. A sum above the range of the clock gives
+/// `at`, thus a wait with no sense ends at once and stops no task.
+fn later(at: tokio::time::Instant, wait: Duration) -> tokio::time::Instant {
+    at.checked_add(wait).unwrap_or(at)
+}
+
 /// Runs the node until each sender of `inputs` closes, or until the store
 /// fails. `store` takes the changes of each call of the node before an
 /// output of that call leaves (`NET-298`). A relay that cannot write stops,
@@ -681,7 +682,7 @@ pub async fn run_node(
                     if let std::collections::btree_map::Entry::Vacant(slot) =
                         next_tick.entry(circuit)
                     {
-                        let at = instant + draw_wait(&mut rng);
+                        let at = later(instant, draw_wait(&mut rng));
                         slot.insert(at);
                         ticks.push(Reverse((at, circuit)));
                     }
@@ -705,7 +706,7 @@ pub async fn run_node(
                     }
 
                     outputs.extend(node.pacing_tick(&circuit, now, &mut rng));
-                    let next = instant + draw_wait(&mut rng);
+                    let next = later(instant, draw_wait(&mut rng));
                     next_tick.insert(circuit, next);
                     ticks.push(Reverse((next, circuit)));
                 }
@@ -748,7 +749,7 @@ pub async fn run_node(
                 break;
             };
 
-            taken += 1;
+            taken = taken.saturating_add(1);
             match take_input(&mut node, &mut links, input, &mut rng) {
                 Some(more) => {
                     moved = moves_session(&more);
@@ -870,7 +871,7 @@ impl Lane {
         }
 
         if state.workers < LANE_WORKERS && state.workers < state.waiting.len() {
-            state.workers += 1;
+            state.workers = state.workers.saturating_add(1);
             return true;
         }
 
@@ -935,9 +936,10 @@ impl Lane {
             return;
         }
 
-        let doubled = LANE_HOLD_OFF.saturating_mul(1u32 << state.failures.min(16));
+        let factor = 1u32.checked_shl(state.failures.min(16)).unwrap_or(u32::MAX);
+        let doubled = LANE_HOLD_OFF.saturating_mul(factor);
         state.failures = state.failures.saturating_add(1);
-        state.closed_until = Some(now + doubled.min(LANE_HOLD_OFF_MAX));
+        state.closed_until = Some(later(now, doubled.min(LANE_HOLD_OFF_MAX)));
     }
 }
 
@@ -1331,7 +1333,7 @@ impl Place {
             return None;
         }
 
-        *count += 1;
+        *count = count.saturating_add(1);
         Some(Place(counts.clone(), ip))
     }
 }
@@ -1855,7 +1857,10 @@ pub async fn serve_connection<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
+    let deadline = later(
+        tokio::time::Instant::now(),
+        carried.limits.handshake_timeout,
+    );
     let socket = native::Coalesced::new(stream);
     let state = socket.state();
     serve_connection_until(socket, link, node, carried, deadline, None, state).await;
@@ -1890,7 +1895,7 @@ pub async fn serve_connection_until<S>(
 
     // NET-335: a POST reads its request and gets its answer by the deadline
     // and a grace for the answer, thus a peer that stalls holds no slot.
-    let post_end = deadline + POST_GRACE;
+    let post_end = later(deadline, POST_GRACE);
 
     let request = loop {
         if is_post(&inbound, OHTTP_PATH) {
@@ -2235,7 +2240,7 @@ pub async fn accept_loop(
         // NET-335: one deadline from the accept covers the TLS handshake and
         // the request.
         let accepted_at = tokio::time::Instant::now();
-        let deadline = accepted_at + limits.handshake_timeout;
+        let deadline = later(accepted_at, limits.handshake_timeout);
 
         tokio::spawn(async move {
             let _held = held;
@@ -2247,7 +2252,7 @@ pub async fn accept_loop(
             // of silent sockets thus holds no handshake back. Before this,
             // one byte took a place among the handshakes for the whole of
             // RELAY_HANDSHAKE_TIMEOUT.
-            let first = deadline.min(accepted_at + limits.first_bytes_timeout);
+            let first = deadline.min(later(accepted_at, limits.first_bytes_timeout));
             let socket = native::Coalesced::new(tcp);
             let state = socket.state();
             let hello =
@@ -2297,7 +2302,10 @@ pub async fn accept_loop(
             // The rest of the handshake is one flight of each side, and a
             // peer that holds its own back gives the place up at
             // RELAY_HANDSHAKE_END_TIMEOUT.
-            let end = deadline.min(tokio::time::Instant::now() + limits.handshake_end_timeout);
+            let end = deadline.min(later(
+                tokio::time::Instant::now(),
+                limits.handshake_end_timeout,
+            ));
             let accepted =
                 tokio::time::timeout_at(end, start.into_stream(tls.config().clone())).await;
 
@@ -2328,7 +2336,7 @@ pub async fn accept_loop(
                 // a client at that address. It takes a place of the address
                 // as each other connection does, and it closes when the
                 // address holds none.
-                let window = deadline + Duration::from_secs(LINK_OPEN_TIMEOUT);
+                let window = later(deadline, Duration::from_secs(LINK_OPEN_TIMEOUT));
                 tokio::select! {
                     () = &mut serve => return,
                     () = tokio::time::sleep_until(window) => {}

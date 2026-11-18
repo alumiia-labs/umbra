@@ -597,7 +597,7 @@ impl CircuitTable {
                 return false;
             }
 
-            tokens.builds -= 1;
+            tokens.builds = tokens.builds.saturating_sub(1);
         }
 
         let relay = match origin {
@@ -617,11 +617,11 @@ impl CircuitTable {
                 return false;
             }
 
-            tokens.builds -= 1;
+            tokens.builds = tokens.builds.saturating_sub(1);
         }
 
-        budget.tokens.builds -= 1;
-        budget.circuits += 1;
+        budget.tokens.builds = budget.tokens.builds.saturating_sub(1);
+        budget.circuits = budget.circuits.saturating_add(1);
         true
     }
 
@@ -643,7 +643,10 @@ impl CircuitTable {
             .len()
             .saturating_add(usize::from(!self.counts.contains_key(joining)));
 
-        (self.held_max / holders.max(1)).max(1)
+        self.held_max
+            .checked_div(holders)
+            .unwrap_or(self.held_max)
+            .max(1)
     }
 
     /// Moves the count of the circuits of `holder` by one.

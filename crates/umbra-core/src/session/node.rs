@@ -1994,7 +1994,7 @@ const DEL_DELAY_MAX: u64 = ROTATE_GRACE / 1_000 * ROTATE_JITTER_PERMILLE;
 /// value. Thus the relay of a new queue cannot name the time at which the
 /// relay of the replaced one sees its `DEL` (`WIR-044`, `NET-323`).
 fn del_delay<R: CryptoRng + ?Sized>(rng: &mut R) -> u64 {
-    1 + u64::from_be_bytes(random(rng)) % DEL_DELAY_MAX
+    (u64::from_be_bytes(random(rng)) % DEL_DELAY_MAX).saturating_add(1)
 }
 
 /// The tail of a stored half: the time of its issue, and whether a relay
@@ -2045,10 +2045,13 @@ const ROTATE_JITTER_PERMILLE: u64 = 200;
 /// queues rotate together (`NET-018`, `NET-019`), and no relay can
 /// predict the time (`NET-323`).
 fn rotate_age(salt: &[u8; 16], queue: &[u8; 32]) -> u64 {
+    const LOWEST: u64 = 1_000 - ROTATE_JITTER_PERMILLE;
+    const SPAN: u64 = 2 * ROTATE_JITTER_PERMILLE + 1;
+
     let hash = umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::ROTATE_JITTER, salt, queue]);
     let draw = u64::from(u16::from_be_bytes([hash[0], hash[1]]));
-    let permille = 1_000 - ROTATE_JITTER_PERMILLE + draw % (2 * ROTATE_JITTER_PERMILLE + 1);
-    ROTATE_AFTER / 1_000 * permille
+    let permille = LOWEST.saturating_add(draw % SPAN);
+    (ROTATE_AFTER / 1_000).saturating_mul(permille)
 }
 
 /// The version of the stored form of a notify queue: the version, the relay,
@@ -2248,13 +2251,6 @@ fn random_secret<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<N
     let mut secret = Secret::zeroed();
     rng.fill_bytes(secret.expose_mut());
     secret
-}
-
-/// A second secret with the bytes of `secret`, with no plain copy between.
-fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
-    let mut copy = Secret::zeroed();
-    copy.expose_mut().copy_from_slice(secret.expose());
-    copy
 }
 
 /// `ClientNode::new` takes an array of three, thus this path never runs. It
@@ -4453,7 +4449,10 @@ impl ClientNode {
             // check, thus each target of the step has its turn.
             let draw = usize::from(u16::from_be_bytes(random(rng)));
             for turn in 0..targets.len() {
-                let at = draw.wrapping_add(turn) % targets.len();
+                let at = draw
+                    .wrapping_add(turn)
+                    .checked_rem(targets.len())
+                    .unwrap_or(0);
                 let Some(target) = targets.get(at).copied() else {
                     continue;
                 };
@@ -5761,7 +5760,8 @@ impl ClientNode {
         // from 20 to 120 s.
         // 16 bits make the bias of the remainder small: 8 bits would give
         // the first 54 values a higher chance.
-        self.rendezvous_wait = 20 + u64::from(u16::from_be_bytes(random(rng))) % 101;
+        self.rendezvous_wait =
+            (u64::from(u16::from_be_bytes(random(rng))) % 101).saturating_add(20);
         self.rendezvous_at = None;
 
         // Each handshake sends again what it sent last and no relay
@@ -6478,7 +6478,9 @@ impl ClientNode {
         // REL-196: a draw in proportion to the class of each relay, then the
         // relays that serve fewer circuits of this node first.
         let mut candidates = weighted_order(&pool, &mut |bound| {
-            u64::from_be_bytes(random(rng)) % bound.max(1)
+            u64::from_be_bytes(random(rng))
+                .checked_rem(bound)
+                .unwrap_or(0)
         });
         candidates.sort_by_key(|candidate| uses(&candidate.relay_id));
         let kept: Vec<Candidate> = candidates
@@ -7265,9 +7267,6 @@ impl ClientNode {
             .watch_slot(&held.relay, &held.notifier_id)
             .ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
-        if let Some(slot) = self.slots.get_mut(self.current) {
-            slot.queues.insert(held.notifier_id);
-        }
 
         let mut command = Command {
             cmd: Cmd::Nsub,
@@ -7282,6 +7281,11 @@ impl ClientNode {
         let mut encoded = alloc::vec![0u8; command.len()];
         command.encode(&mut encoded)?;
         self.queue_command(encoded, Waiting::Other)?;
+
+        // The slot counts the watch only when its command is in the queue.
+        if let Some(slot) = self.slots.get_mut(self.current) {
+            slot.queues.insert(held.notifier_id);
+        }
         self.pump()
     }
 
@@ -8425,7 +8429,9 @@ impl ClientNode {
         // random. Thus the loops measure each chain of this client and not
         // the first one alone.
         let pick = if ready_count > 1 {
-            usize::from(u16::from_be_bytes(random(rng))) % ready_count
+            usize::from(u16::from_be_bytes(random(rng)))
+                .checked_rem(ready_count)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -8831,7 +8837,8 @@ impl ClientNode {
         };
 
         let draw = u64::from_be_bytes(random(rng));
-        let pick = usize::try_from(draw % open.len() as u64).map_err(|_| Error::Malformed)?;
+        let pick = draw.checked_rem(open.len() as u64).ok_or(Error::NoPath)?;
+        let pick = usize::try_from(pick).map_err(|_| Error::Malformed)?;
         let to = open.get(pick).ok_or(Error::NoPath)?;
         let report_pk = self
             .report_queues
@@ -8891,13 +8898,16 @@ impl ClientNode {
                 continue;
             };
 
-            channel.acknowledged_on(&queue, point);
+            // The cursor moves only when the `ACK` is in the queue. A cursor
+            // that moved with no `ACK` would leave the records at the relay.
+            self.queue_command(encoded, Waiting::Other)?;
+            let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+            held.channel.acknowledged_on(&queue, point);
             // WIR-117: the conversation shows a gap from this point on.
             if point.crosses_hole {
                 self.gaps.push(*contact);
             }
             self.moved.insert(contact.0);
-            self.queue_command(encoded, Waiting::Other)?;
             self.pump()?;
             return Ok(true);
         }
@@ -8931,13 +8941,16 @@ impl ClientNode {
                 continue;
             };
 
+            self.queue_command(encoded, Waiting::Other)?;
+            let Some(ending) = self.ending.get_mut(&queue) else {
+                continue;
+            };
             ending.inbound.acknowledged(point);
             let state = ending_state(ending)?;
             if point.crosses_hole {
                 self.gaps.push(*contact);
             }
             self.changes.push(StateChange::Invitation { queue, state });
-            self.queue_command(encoded, Waiting::Other)?;
             self.pump()?;
             return Ok(true);
         }
@@ -10256,8 +10269,8 @@ impl ClientNode {
         let own_address = || QueueAddress {
             relay_id: queue_relay,
             sender_id: ids.sender_id,
-            qs_auth_sk: copy_secret(&keys.qs_auth),
-            qe: copy_secret(&keys.queue_secret),
+            qs_auth_sk: keys.qs_auth.duplicate(),
+            qe: keys.queue_secret.duplicate(),
         };
         let inbound = Inbound::new(
             ids.recipient_id,

@@ -215,7 +215,11 @@ impl LogNodes {
 
         if count.is_power_of_two() && start.is_multiple_of(count) {
             let height = usize::try_from(count.trailing_zeros()).ok()?;
-            return self.levels.get(height)?.get(start / count).copied();
+            return self
+                .levels
+                .get(height)?
+                .get(start.checked_div(count)?)
+                .copied();
         }
 
         let k = split_point(count);

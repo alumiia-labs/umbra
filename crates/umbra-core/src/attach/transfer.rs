@@ -77,7 +77,7 @@ impl DownloadBudget {
     fn share(&self) -> usize {
         let open = self.open.load(Ordering::Relaxed).max(1);
 
-        (MAX_CONCURRENT_DOWN / open).max(1)
+        MAX_CONCURRENT_DOWN.checked_div(open).unwrap_or(1).max(1)
     }
 
     fn has_room(&self) -> bool {
@@ -166,14 +166,14 @@ fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
     let bound = bound.max(1);
     // A draw at or above the highest multiple of the bound goes again, thus
     // each value below the bound is equally likely.
-    let zone = u32::MAX - u32::MAX % bound;
+    let zone = u32::MAX.saturating_sub(u32::MAX.checked_rem(bound).unwrap_or(0));
 
     loop {
         let mut bytes = [0u8; 4];
         rng.fill_bytes(&mut bytes);
         let value = u32::from_be_bytes(bytes);
         if value < zone {
-            return value % bound;
+            return value.checked_rem(bound).unwrap_or(0);
         }
     }
 }
@@ -189,13 +189,6 @@ fn random_secret<R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<32> {
     let mut secret = Secret::zeroed();
     rng.fill_bytes(secret.expose_mut());
     secret
-}
-
-/// A second `Secret` with the bytes of `secret`, written in place.
-fn copy_secret(secret: &Secret<32>) -> Secret<32> {
-    let mut copy = Secret::zeroed();
-    copy.expose_mut().copy_from_slice(secret.expose());
-    copy
 }
 
 /// What the uploader keeps of one chunk until the chunk is erased
@@ -406,7 +399,7 @@ impl Upload {
             class,
             data_chunks: sealed.chunks.len(),
             sealed,
-            chunk_key: copy_secret(&file_key),
+            chunk_key: file_key.duplicate(),
             data: None,
             file_key,
             file_nonce,
@@ -455,7 +448,7 @@ impl Upload {
                 chunk.is_noted = true;
                 started.push(ChunkCredential {
                     chunk_id: *chunk.upload.chunk_id(),
-                    cred: copy_secret(&chunk.cred),
+                    cred: chunk.cred.duplicate(),
                     relays: chunk.relays.clone(),
                 });
             }
@@ -557,7 +550,7 @@ impl Upload {
             refs.extend(chunk.upload.chunk_refs()?);
             credentials.push(ChunkCredential {
                 chunk_id: *chunk.upload.chunk_id(),
-                cred: copy_secret(&chunk.cred),
+                cred: chunk.cred.duplicate(),
                 relays: chunk.relays.clone(),
             });
         }
@@ -1121,7 +1114,7 @@ impl Upload {
         Ok(Uploaded {
             descriptor: FileDescriptor {
                 level,
-                file_key: copy_secret(&self.file_key),
+                file_key: self.file_key.duplicate(),
                 file_nonce: self.file_nonce,
                 commit,
                 digest,
@@ -1447,7 +1440,7 @@ impl Download {
         rng: &mut R,
     ) -> Result<Self, Error> {
         let data = Assembler::for_data(descriptor)?;
-        let file_key = copy_secret(&descriptor.file_key);
+        let file_key = descriptor.file_key.duplicate();
         let (assembler, chunk_key, expected, then) = match descriptor.level {
             Level::Data => (data, file_key, descriptor.refs.len(), None),
             Level::Manifest => {
@@ -1889,7 +1882,7 @@ impl ChunkFetch {
         order.reverse();
 
         Ok(ChunkFetch {
-            file_key: copy_secret(&descriptor.file_key),
+            file_key: descriptor.file_key.duplicate(),
             file_nonce: descriptor.file_nonce,
             index,
             is_last: position.saturating_add(1) == descriptor.refs.len(),

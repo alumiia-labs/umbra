@@ -33,7 +33,10 @@ pub fn sample_positions(count: u32, sample: usize, random: &mut dyn FnMut(u32) -
     let mut picked = Vec::with_capacity(wanted);
     for _ in 0..wanted {
         let bound = u32::try_from(positions.len()).unwrap_or(u32::MAX);
-        let at = usize::try_from(random(bound)).unwrap_or(0) % positions.len().max(1);
+        let at = usize::try_from(random(bound))
+            .unwrap_or(0)
+            .checked_rem(positions.len())
+            .unwrap_or(0);
         picked.push(positions.swap_remove(at));
     }
     picked

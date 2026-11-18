@@ -182,7 +182,7 @@ impl Ndr {
         // The phase `start` belongs to the span before this one, thus the
         // lower bound is exclusive and no handle fires two times.
         let above = |low| (Bound::Excluded(low), Bound::Included(through));
-        let due: Vec<&(u64, [u8; HANDLE_LEN])> = if to - from >= PERIODIC_INTERVAL {
+        let due: Vec<&(u64, [u8; HANDLE_LEN])> = if to.saturating_sub(from) >= PERIODIC_INTERVAL {
             self.timers.iter().collect()
         } else if start < end {
             self.timers.range(above(after)).collect()

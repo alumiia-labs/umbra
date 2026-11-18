@@ -29,6 +29,7 @@
 //! sums one way of a call for two designs: a splice at layer 2 (four links)
 //! and a splice at layer 3 (six links). Both parties of that sum sit at the
 //! place of this machine, thus the sum is a floor for two parties far apart.
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{
     collections::BTreeMap,
@@ -37,6 +38,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use umbra_relay::clock::unix_now;
 
 use umbra_core::directory::{
     bloc::BlocList,
@@ -64,12 +66,6 @@ const ROUNDS: usize = 10;
 const PAUSE: Duration = Duration::from_millis(200);
 
 type Failure = &'static str;
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |at| at.as_secs())
-}
 
 /// The relays of a manifest that verifies under the key set, as the
 /// measurer reads them.
@@ -159,7 +155,7 @@ async fn build(
     let mut draw = [0u8; 16 + 4 + 8 + 32 + 16];
     rng.try_fill_bytes(&mut draw)
         .map_err(|_| "the random source failed")?;
-    let take = |from: usize, len: usize| draw.get(from..from + len).unwrap_or(&[]);
+    let take = |from: usize, len: usize| draw.get(from..from.saturating_add(len)).unwrap_or(&[]);
     let ws_key: [u8; 16] = take(0, 16).try_into().map_err(|_| "a local fault")?;
     let mask: [u8; 4] = take(16, 4).try_into().map_err(|_| "a local fault")?;
     let session_id: [u8; 8] = take(20, 8).try_into().map_err(|_| "a local fault")?;
@@ -401,7 +397,10 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
                             whole.push(ms(*two));
                         }
                     }
-                    Err(cause) => *failures.entry(cause).or_default() += 1,
+                    Err(cause) => {
+                        let count = failures.entry(cause).or_default();
+                        *count = count.saturating_add(1);
+                    }
                 }
                 tokio::time::sleep(PAUSE).await;
             }
@@ -428,7 +427,10 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
                                 whole.push(ms(*three));
                             }
                         }
-                        Err(cause) => *failures.entry(cause).or_default() += 1,
+                        Err(cause) => {
+                            let count = failures.entry(cause).or_default();
+                            *count = count.saturating_add(1);
+                        }
                     }
                     tokio::time::sleep(PAUSE).await;
                 }

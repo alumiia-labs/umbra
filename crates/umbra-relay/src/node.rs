@@ -162,7 +162,7 @@ pub enum Output {
 
 /// One capsule of `kind` for `link`.
 fn capsule_output(link: LinkId, kind: CapsuleType, value: &[u8]) -> Option<Output> {
-    let mut capsule = vec![0u8; capsule::HEADER_LEN + value.len()];
+    let mut capsule = vec![0u8; capsule::HEADER_LEN.saturating_add(value.len())];
     let used = capsule::encode(kind, value, &mut capsule).ok()?;
     capsule.truncate(used);
     Some(Output::Send { link, capsule })
@@ -176,7 +176,7 @@ fn destroy_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
         .encode(&mut control)
         .ok()?;
 
-    let mut capsule = vec![0u8; capsule::HEADER_LEN + used];
+    let mut capsule = vec![0u8; capsule::HEADER_LEN.saturating_add(used)];
     let used = capsule::encode(CapsuleType::Session, control.get(..used)?, &mut capsule).ok()?;
     capsule.truncate(used);
     Some(Output::Send { link, capsule })
@@ -774,7 +774,7 @@ fn fits(
     };
 
     let waiting = framed.get(&link).copied().unwrap_or(0);
-    held.saturating_add(waiting).saturating_add(len) <= limit / part.max(1)
+    held.saturating_add(waiting).saturating_add(len) <= limit.checked_div(part).unwrap_or(limit)
 }
 
 /// The range of an encoded command, from its command byte.
@@ -1523,7 +1523,7 @@ impl RelayNode {
                 continue;
             }
 
-            let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+            let mut capsule = vec![0u8; capsule::HEADER_LEN.saturating_add(encoded.len())];
             if let Ok(used) = capsule::encode(CapsuleType::Challenge, &encoded, &mut capsule) {
                 capsule.truncate(used);
                 outputs.push(Output::Push {
@@ -1630,7 +1630,7 @@ impl RelayNode {
                 continue;
             };
 
-            let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+            let mut capsule = vec![0u8; capsule::HEADER_LEN.saturating_add(encoded.len())];
             if let Ok(used) = capsule::encode(CapsuleType::Deposit, &encoded, &mut capsule) {
                 capsule.truncate(used);
                 outputs.push(Output::Push {

@@ -10,6 +10,7 @@
 //! two values.
 #![forbid(unsafe_code)]
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 // The skipped-key store of the ratchet lives on the heap, as Part 14 §14.4
 // prefers for a secret.
@@ -22,6 +23,7 @@ pub mod dead;
 pub mod group;
 pub mod handshake;
 pub mod hash;
+pub mod hex;
 pub mod hierarchy;
 pub mod hpke;
 pub mod kdf;

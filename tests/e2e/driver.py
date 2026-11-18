@@ -43,6 +43,10 @@ class Device:
     def reset(self):
         """Clears the store of the app. A clear takes each permission, thus this gives them again."""
         self.shell(f"pm clear {PACKAGE}")
+        self.grant()
+
+    def grant(self):
+        """Gives each permission, thus no dialog of the system covers the app."""
         for permission in ("POST_NOTIFICATIONS", "CAMERA", "RECORD_AUDIO"):
             self.shell(f"pm grant {PACKAGE} android.permission.{permission}", check=False)
 

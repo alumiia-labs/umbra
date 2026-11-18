@@ -358,7 +358,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.replay_group_records(subject, conversation, rng)?;
 
         // DEV-301: a re-key item that came before the group applies now.
-        self.retry_rekey_items(super::unix_now_seconds().saturating_mul(1_000), rng)?;
+        self.retry_rekey_items(crate::clock::unix_now().saturating_mul(1_000), rng)?;
 
         Ok(conversation)
     }

@@ -81,7 +81,8 @@ pub fn open(secret: &Secret<32>, label: &[u8], sealed: &[u8]) -> Result<Vec<u8>,
     }
 
     let (ephemeral_pk, rest) = sealed.split_at(32);
-    let (body, tag) = rest.split_at(rest.len() - TAG_LEN);
+    let body_len = rest.len().checked_sub(TAG_LEN).ok_or(Error::Length)?;
+    let (body, tag) = rest.split_at(body_len);
 
     let ephemeral_pk: [u8; 32] = ephemeral_pk.try_into().map_err(|_| Error::Length)?;
     let own = scalar_of(secret.expose());

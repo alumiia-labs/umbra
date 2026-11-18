@@ -96,6 +96,7 @@
 //! authority and not the web roots. A deployment leaves it out.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::{collections::BTreeMap, process::ExitCode};
 
@@ -107,7 +108,7 @@ use umbra_core::directory::{
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hash::sha3_256,
-    ohttp,
+    hex, ohttp,
     secret::Secret,
     sign::SigningKey,
     x25519::{PublicKey as XPublic, StaticSecret},
@@ -125,35 +126,13 @@ use umbra_relay::{
 };
 use umbra_transport::{https, native, ndr::NdrRoute, Dial};
 
-fn hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect()
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    hex(text)?.try_into().ok()
-}
-
 /// A secret of 32 bytes from its hex form. The bytes go into one buffer and
 /// into no list on the way. `Zeroizing` wipes that buffer when it leaves
 /// memory.
 fn secret32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
-    if text.len() != 64 {
-        return None;
-    }
     let mut out = Zeroizing::new([0u8; 32]);
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
+    hex::read_into(text, out.as_mut_slice())?;
+
     Some(out)
 }
 
@@ -312,7 +291,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         }
 
         let mut parts = value.split(',');
-        let relay_id = hex32(parts.next()?)?;
+        let relay_id = hex::read_array::<32>(parts.next()?)?;
         let host = parts.next()?.to_owned();
         let address: std::net::Ipv4Addr = parts.next()?.parse().ok()?;
         let port = parts.next()?.parse().ok()?;
@@ -340,7 +319,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         .as_ref()
         .map(|key| sha3_256(&[&key.verifying_key().to_bytes()]));
     let written = match values.get("relay_id") {
-        Some(text) => Some(hex32(text)?),
+        Some(text) => Some(hex::read_array::<32>(text)?),
         None => None,
     };
 
@@ -559,7 +538,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         },
         ndr_route: match (values.get("ndr_route"), values.get("ndr_key_config")) {
             (Some(url), Some(config)) => {
-                let (key_id, gateway) = ohttp::parse_key_config(&hex(config)?).ok()?;
+                let (key_id, gateway) = ohttp::parse_key_config(&hex::read_vec(config)?).ok()?;
                 Some(NdrRoute {
                     relay: https::Url::parse(url)?,
                     key_id,
@@ -572,7 +551,8 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         directory_read: match (values.get("directory_route"), values.get("directory_pins")) {
             (Some(url), Some(pins)) => Some((
                 https::Url::parse(url)?,
-                umbra_core::discovery::dirclient::DirectoryPins::parse(&hex(pins)?).ok()?,
+                umbra_core::discovery::dirclient::DirectoryPins::parse(&hex::read_vec(pins)?)
+                    .ok()?,
             )),
             (None, None) => None,
             _ => return None,
@@ -605,15 +585,15 @@ fn keygen() -> ExitCode {
     // `Zeroizing` wipes the hex form of each secret after its line.
     println!(
         "identity_seed={}",
-        Zeroizing::new(to_hex(identity_seed.as_slice())).as_str()
+        Zeroizing::new(hex::write(identity_seed.as_slice())).as_str()
     );
     println!(
         "static_secret={}",
-        Zeroizing::new(to_hex(static_secret.as_slice())).as_str()
+        Zeroizing::new(hex::write(static_secret.as_slice())).as_str()
     );
     println!(
         "# relay_id {}",
-        to_hex(&sha3_256(&[&identity.verifying_key().to_bytes()]))
+        hex::write(&sha3_256(&[&identity.verifying_key().to_bytes()]))
     );
     ExitCode::SUCCESS
 }
@@ -691,7 +671,7 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
         host,
         asn: fact("asn")?.parse().ok()?,
         jurisdiction: fact("country")?.as_bytes().try_into().ok()?,
-        family_id: hex32(fact("family")?)?,
+        family_id: hex::read_array::<32>(fact("family")?)?,
         capacity_class: fact("class")?.parse().ok()?,
         roles: role_bits,
         chunk_store_gib: declared_store_gib(role_bits, settings.config.chunk_capacity),
@@ -731,8 +711,8 @@ fn descriptor(settings: &Settings) -> ExitCode {
 
     println!(
         "relay {host} {address} {port} {} {} layer={}{facts}",
-        to_hex(&settings.config.relay.s),
-        to_hex(&settings.config.relay.relay_id),
+        hex::write(&settings.config.relay.s),
+        hex::write(&settings.config.relay.relay_id),
         settings.config.layer,
     );
 
@@ -825,8 +805,8 @@ async fn run() -> ExitCode {
     // The public half of the identity, for the network record of a client.
     println!(
         "relay_id={} static_key={} layer={} listen={}",
-        to_hex(&settings.config.relay.relay_id),
-        to_hex(&settings.config.relay.s),
+        hex::write(&settings.config.relay.relay_id),
+        hex::write(&settings.config.relay.s),
         settings.config.layer,
         settings.listen,
     );

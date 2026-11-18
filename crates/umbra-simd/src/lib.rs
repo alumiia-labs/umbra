@@ -7,6 +7,7 @@
 //! core no hook (`IMP-124`). Thus the allocator overwrites each block with
 //! zero bytes before it frees it.
 #![deny(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -73,10 +74,13 @@ pub fn wipe(bytes: &mut [u8]) {
 /// `start` must be valid for writes of `len` bytes.
 #[allow(unsafe_code)]
 unsafe fn wipe_raw(start: *mut u8, len: usize) {
-    let word_size = core::mem::size_of::<usize>();
+    const WORD_SIZE: usize = core::mem::size_of::<usize>();
+
+    // `head` is at most `len`, and the words fit in the bytes after `head`.
+    // Thus no step here clamps, and `tail` is at most `len`.
     let head = start.align_offset(core::mem::align_of::<usize>()).min(len);
-    let word_count = (len - head) / word_size;
-    let tail = head + word_count * word_size;
+    let word_count = len.saturating_sub(head) / WORD_SIZE;
+    let tail = head.saturating_add(word_count.saturating_mul(WORD_SIZE));
 
     // SAFETY: each write is inside the `len` bytes from `start`. The words
     // start at an aligned address, and they end at `tail`, which is at most

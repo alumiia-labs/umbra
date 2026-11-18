@@ -95,7 +95,9 @@ impl LinkRemoval {
     /// signatures.
     pub fn len_of(bytes: &[u8]) -> Result<usize, Error> {
         let count = usize::from(*bytes.get(FIXED_LEN).ok_or(Error::Malformed)?);
-        Ok(FIXED_LEN + 1 + count * (1 + SIGNATURE_LEN))
+        Ok(count
+            .saturating_mul(const { 1 + SIGNATURE_LEN })
+            .saturating_add(const { FIXED_LEN + 1 }))
     }
 
     /// Reads a removal and verifies it under `keyset` for a root of

@@ -133,8 +133,8 @@ impl Plan {
     pub fn of(class: u8, slot: Duration, sockets: usize, scale: u64) -> Option<Self> {
         let scale = scale.max(1);
         Some(Plan {
-            send_bits: capacity_needed(class)? / scale,
-            pass_bits: CLASS_RATES.get(usize::from(class))? / scale,
+            send_bits: capacity_needed(class)?.checked_div(scale)?,
+            pass_bits: CLASS_RATES.get(usize::from(class))?.checked_div(scale)?,
             slot,
             sockets: sockets.clamp(1, MEAS_CIRCUITS_MAX),
         })
@@ -170,7 +170,9 @@ pub enum MeasureError {
 }
 
 fn bits_of_cells(cells: u64) -> u64 {
-    cells.saturating_mul(Bucket::B0.cell_len() as u64 * 8)
+    cells
+        .saturating_mul(Bucket::B0.cell_len() as u64)
+        .saturating_mul(8)
 }
 
 /// The link session and the circuit of one connection with an open
@@ -190,7 +192,7 @@ impl Socket {
         let tag = self.circuit.seal(&mut body).ok()?;
         let cell = [self.circuit.circ_id().as_slice(), &tag, &body].concat();
 
-        let mut capsule = vec![0u8; cell.len() + 64];
+        let mut capsule = vec![0u8; cell.len().saturating_add(64)];
         let used = self.link.send(&cell, &mut capsule).ok()?;
         capsule.truncate(used);
         Some(capsule)
@@ -236,7 +238,7 @@ async fn open_socket(
     rng.try_fill_bytes(&mut draw)
         .map_err(|_| MeasureError::Local)?;
 
-    let take = |from: usize, len: usize| draw.get(from..from + len).unwrap_or(&[]);
+    let take = |from: usize, len: usize| draw.get(from..from.saturating_add(len)).unwrap_or(&[]);
     let ws_key: [u8; 16] = take(0, 16).try_into().map_err(|_| MeasureError::Local)?;
     let mask: [u8; 4] = take(16, 4).try_into().map_err(|_| MeasureError::Local)?;
     let session_id: [u8; 8] = take(20, 8).try_into().map_err(|_| MeasureError::Local)?;
@@ -381,7 +383,7 @@ async fn run_socket(
     let mut count = |socket: &mut Socket, arrivals: &mut mpsc::Receiver<(Instant, Vec<u8>)>| {
         while let Ok((at, bytes)) = arrivals.try_recv() {
             if socket.is_echo(&bytes) && at < end {
-                echoed += 1;
+                echoed = echoed.saturating_add(1);
             }
         }
     };
@@ -418,7 +420,7 @@ async fn run_socket(
                     batch.push(capsule);
                 }
 
-                sent += batch.len() as u64;
+                sent = sent.saturating_add(batch.len() as u64);
                 permit.send(batch);
 
                 // A full batch tells of a measurer behind its rate. Such a
@@ -478,8 +480,10 @@ pub async fn measure(
 
     let cell_bits = bits_of_cells(1) as f64;
     let each = plan.send_bits as f64 / cell_bits / plan.sockets as f64;
-    let start = Instant::now() + Duration::from_millis(50);
-    let end = start + plan.slot;
+    let start = Instant::now()
+        .checked_add(Duration::from_millis(50))
+        .ok_or(MeasureError::Local)?;
+    let end = start.checked_add(plan.slot).ok_or(MeasureError::Local)?;
 
     let runs: Vec<_> = sockets
         .into_iter()
@@ -489,14 +493,17 @@ pub async fn measure(
     let (mut sent, mut echoed) = (0u64, 0u64);
     for run in runs {
         let (one_sent, one_echoed) = run.await.map_err(|_| MeasureError::Local)?;
-        sent += one_sent;
-        echoed += one_echoed;
+        sent = sent.saturating_add(one_sent);
+        echoed = echoed.saturating_add(one_echoed);
     }
 
     let millis = u64::try_from(plan.slot.as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
-    let echoed_bits = bits_of_cells(echoed).saturating_mul(1_000) / millis;
+    let echoed_bits = bits_of_cells(echoed)
+        .saturating_mul(1_000)
+        .checked_div(millis)
+        .unwrap_or(0);
 
     Ok(Outcome {
         sent,
@@ -510,10 +517,8 @@ pub async fn measure(
 /// `class`: each test needs 2.25 times the rate of the class (§10.3).
 pub fn slot_width(capacity_bits: u64, class: u8) -> usize {
     capacity_needed(class)
-        .filter(|needed| *needed > 0)
-        .map_or(0, |needed| {
-            usize::try_from(capacity_bits / needed).unwrap_or(usize::MAX)
-        })
+        .and_then(|needed| capacity_bits.checked_div(needed))
+        .map_or(0, |width| usize::try_from(width).unwrap_or(usize::MAX))
 }
 
 /// The highest class that a measurer of `capacity_bits` tests, or none
@@ -530,7 +535,7 @@ pub fn highest_class(capacity_bits: u64) -> Option<u8> {
 pub fn clusters(targets: &[Target]) -> Vec<Vec<usize>> {
     let mut cluster_of: Vec<usize> = (0..targets.len()).collect();
     for (index, target) in targets.iter().enumerate() {
-        for (other_index, other) in targets.iter().enumerate().skip(index + 1) {
+        for (other_index, other) in targets.iter().enumerate().skip(index.saturating_add(1)) {
             if !target.is_near(other) {
                 continue;
             }
@@ -592,7 +597,11 @@ pub fn slots<R: TryCryptoRng + ?Sized>(
         // A uniform order, by the Fisher-Yates method.
         for last in (1..cluster.len()).rev() {
             let draw = rng.try_next_u64().unwrap_or(0);
-            let pick = usize::try_from(draw % (last as u64 + 1)).unwrap_or(0);
+            let pick = usize::try_from(
+                draw.checked_rem((last as u64).saturating_add(1))
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
             cluster.swap(last, pick);
         }
 

@@ -57,7 +57,7 @@ impl<'a> OwnerClaimRecord<'a> {
             if self
                 .claims
                 .iter()
-                .skip(i + 1)
+                .skip(i.saturating_add(1))
                 .any(|b| b.subject == a.subject)
             {
                 return Err(Error::Malformed);
@@ -99,7 +99,7 @@ impl<'a> OwnerClaimRecord<'a> {
         self.put_signed(&mut w)?;
         let n = w.position();
 
-        let mut out = Vec::with_capacity(labels::DEVICE_CLAIM.len() + n);
+        let mut out = Vec::with_capacity(labels::DEVICE_CLAIM.len().saturating_add(n));
         out.extend_from_slice(labels::DEVICE_CLAIM);
         out.extend_from_slice(body.get(..n).ok_or(Error::Malformed)?);
         Ok(out)

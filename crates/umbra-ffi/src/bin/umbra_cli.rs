@@ -29,6 +29,7 @@
 //! | `/list` | Lists the conversations |
 //! | `/use <number>` | Makes a conversation of the list the current one |
 //! | `/quit` | Stops the network and ends the program |
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 use std::collections::HashMap;
 use std::fs;
@@ -515,7 +516,11 @@ impl Cli {
             } else {
                 " "
             };
-            println!("{mark} {} {}", number + 1, short(conversation));
+            println!(
+                "{mark} {} {}",
+                number.saturating_add(1),
+                short(conversation)
+            );
         }
         Ok(())
     }

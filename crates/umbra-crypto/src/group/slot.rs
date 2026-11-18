@@ -26,7 +26,7 @@ pub const SLOT_TAG_LEN: usize = 16;
 /// The length of a sealed slot after its `index` field, for a payload of
 /// `payload_len` bytes.
 pub const fn sealed_len(payload_len: usize) -> usize {
-    CIPHERTEXT_LEN + payload_len + SLOT_TAG_LEN
+    (CIPHERTEXT_LEN + SLOT_TAG_LEN).saturating_add(payload_len)
 }
 
 fn associated_data(group_id: &[u8; 32], epoch: u32, index: u16) -> [u8; 63] {

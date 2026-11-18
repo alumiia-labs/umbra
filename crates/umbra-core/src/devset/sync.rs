@@ -212,7 +212,7 @@ impl ChannelEntry {
     /// The 245 bytes: kind `0x01`, the salt, the key, the key of the peer,
     /// the writer side, the counter of the guard, and its secret.
     pub fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let mut out = Zeroizing::new(Vec::with_capacity(117 + self.outbound.len()));
+        let mut out = Zeroizing::new(Vec::with_capacity(self.outbound.len().saturating_add(117)));
         out.push(0x01);
         out.extend_from_slice(&self.salt);
         out.extend_from_slice(&self.conversation);
@@ -270,8 +270,8 @@ pub struct Origin {
 /// `devices` entries (§7.5.3): the sub-kind, the context, the scope, the
 /// subject, the author, and `inner_len`.
 pub const fn synced_overhead(devices: usize) -> usize {
-    let context = 1 + 8 + 1 + devices * (16 + 8) + 4;
-    1 + context + 1 + 32 + 1 + 4
+    let context = devices.saturating_mul(16 + 8).saturating_add(1 + 8 + 1 + 4);
+    context.saturating_add(1 + 1 + 32 + 1 + 4)
 }
 
 /// A synced conversation record: the causal context, the origin, and the
@@ -352,7 +352,7 @@ pub fn restamp_expires_in(body: &mut [u8], expires_in: u32) -> Result<(), Error>
 /// The length of the context at the front of `bytes`, from its count.
 fn context_len_at(bytes: &[u8]) -> Result<usize, Error> {
     let count = usize::from(*bytes.get(9).ok_or(Error::Malformed)?);
-    Ok(1 + 8 + 1 + count * 24 + 4)
+    Ok(count.saturating_mul(24).saturating_add(1 + 8 + 1 + 4))
 }
 
 /// One item of mutable state, the payload of kind `0x20` sub-kind `0x01`:
@@ -690,7 +690,7 @@ impl InteractiveBucket {
             return false;
         }
 
-        self.tokens -= 1;
+        self.tokens = self.tokens.saturating_sub(1);
         true
     }
 }

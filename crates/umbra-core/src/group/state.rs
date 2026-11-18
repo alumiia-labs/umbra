@@ -1411,7 +1411,9 @@ impl Group {
                     .and_then(|previous| self.roster.rank_at(roster_epoch, previous.index))
             })
             .ok_or(Error::NoPath)?;
-        let chunk = rank / usize::from(slots_per_chunk);
+        let chunk = rank
+            .checked_div(usize::from(slots_per_chunk))
+            .ok_or(Error::Malformed)?;
 
         Ok(Some(WantedChunk {
             descriptor: descriptor.to_vec(),
@@ -2314,7 +2316,8 @@ impl Group {
     ) -> Result<Vec<u8>, Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
         let admins = usize::from(own_sks.is_some());
-        let bucket = bucket_for_slots(admins, 1 - admins).ok_or(Error::NoPath)?;
+        let bucket =
+            bucket_for_slots(admins, 1usize.saturating_sub(admins)).ok_or(Error::NoPath)?;
         let body = one_slot(
             self.roster.group_id(),
             current.epoch(),

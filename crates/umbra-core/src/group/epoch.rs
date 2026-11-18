@@ -112,7 +112,9 @@ pub struct RecordKey {
 /// rotation can start that much earlier.
 pub fn aged_runs(from: u32, to: u32) -> u32 {
     let age = u32::try_from(GROUP_EPOCH_MAX_AGE / GROUP_SLOT).unwrap_or(u32::MAX);
-    to.saturating_sub(from) / age.saturating_sub(GROUP_SLOT_SKEW).max(1)
+    to.saturating_sub(from)
+        .checked_div(age.saturating_sub(GROUP_SLOT_SKEW).max(1))
+        .unwrap_or(0)
 }
 
 /// Where `start_slot` of an epoch-key record falls against the clock at
@@ -1049,10 +1051,9 @@ pub fn one_slot<R: CryptoRng + ?Sized>(
 
 /// The chunk that holds the slot of rank `rank` (`GRP-284`).
 pub const fn chunk_of_rank(rank: usize, slots_per_chunk: u16) -> usize {
-    if slots_per_chunk == 0 {
-        0
-    } else {
-        rank / slots_per_chunk as usize
+    match rank.checked_div(slots_per_chunk as usize) {
+        Some(chunk) => chunk,
+        None => 0,
     }
 }
 

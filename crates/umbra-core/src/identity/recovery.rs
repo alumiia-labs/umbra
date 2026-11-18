@@ -219,7 +219,7 @@ impl<'a> BackupRoot<'a> {
     /// Seals the root into the chunk plaintext of `IDN-094`: the nonce and
     /// the sealed root, before the padding of Part 12 §12.2.3.
     pub fn seal(&self, credentials: &EpochCredentials, nonce: [u8; 24]) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 24 + self.len() + aead::TAG_LEN];
+        let mut out = alloc::vec![0u8; self.len().saturating_add(const { 24 + aead::TAG_LEN })];
         let (nonce_out, rest) = out.split_at_mut(24);
         nonce_out.copy_from_slice(&nonce);
         let n = self.encode(rest)?;
@@ -231,7 +231,7 @@ impl<'a> BackupRoot<'a> {
             .ok_or(Error::Malformed)?
             .copy_from_slice(&tag);
 
-        out.truncate(24 + n + aead::TAG_LEN);
+        out.truncate(n.saturating_add(const { 24 + aead::TAG_LEN }));
         Ok(out)
     }
 
@@ -329,13 +329,15 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
         return Err(Error::Malformed);
     }
 
-    let mut bytes = Zeroizing::new(Vec::with_capacity(4 + payload.len()));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(payload.len().saturating_add(4)));
     bytes.extend_from_slice(&(kind as u16).to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(&check_of(kind, payload));
     let digits = Zeroizing::new(decimal(&bytes, kind.width()));
 
-    let mut out = Zeroizing::new(String::with_capacity(kind.width() + kind.width() / 5));
+    let mut out = Zeroizing::new(String::with_capacity(
+        kind.width().saturating_add(kind.width() / 5),
+    ));
     for (i, group) in digits.as_bytes().chunks(5).enumerate() {
         if i > 0 {
             out.push(' ');
@@ -357,19 +359,20 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>
 
     // The digit count names the length. The root seed and the recovery
     // code share a width, and `type` tells them apart (IDN-153).
-    let total_len = 4 + match digits.len() {
+    let payload_len = match digits.len() {
         87 => DigitsType::Code.payload_len(),
         49 => DigitsType::User.payload_len(),
         51 => DigitsType::Share.payload_len(),
         _ => return Err(Error::Malformed),
     };
+    let total_len = payload_len.saturating_add(4);
 
     // Decimal to big-endian bytes by repeated multiply-add.
     let mut bytes = Zeroizing::new(alloc::vec![0u8; total_len]);
     for d in digits.iter() {
-        let mut carry = u32::from(d - b'0');
+        let mut carry = u32::from(d.saturating_sub(b'0'));
         for b in bytes.iter_mut().rev() {
-            let cur = u32::from(*b) * 10 + carry;
+            let cur = u32::from(*b).saturating_mul(10).saturating_add(carry);
             *b = (cur & 0xFF) as u8;
             carry = cur >> 8;
         }
@@ -436,7 +439,7 @@ pub fn split_social(
     n: u8,
     coeffs: &[u8],
 ) -> Result<Zeroizing<Vec<[u8; 17]>>, Error> {
-    if k < 2 || n < k || coeffs.len() != usize::from(k - 1) * 16 {
+    if k < 2 || n < k || coeffs.len() != usize::from(k.saturating_sub(1)).saturating_mul(16) {
         return Err(Error::Malformed);
     }
 
@@ -453,12 +456,15 @@ pub fn split_social(
         for byte in 0..16 {
             let mut y = secret.expose().get(byte).copied().unwrap_or(0);
             let mut xp = x;
-            for c in 0..usize::from(k - 1) {
-                let coeff = coeffs.get(c * 16 + byte).copied().unwrap_or(0);
+            for c in 0..usize::from(k.saturating_sub(1)) {
+                let coeff = coeffs
+                    .get(c.saturating_mul(16).saturating_add(byte))
+                    .copied()
+                    .unwrap_or(0);
                 y ^= gf_mul(coeff, xp);
                 xp = gf_mul(xp, x);
             }
-            if let Some(slot) = share.get_mut(1 + byte) {
+            if let Some(slot) = share.get_mut(byte.saturating_add(1)) {
                 *slot = y;
             }
         }
@@ -486,7 +492,7 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
         let mut acc = 0u8;
         for (i, share) in shares.iter().enumerate() {
             let xi = share[0];
-            let yi = share.get(1 + byte).copied().unwrap_or(0);
+            let yi = share.get(byte.saturating_add(1)).copied().unwrap_or(0);
             let mut num = 1u8;
             let mut den = 1u8;
             for (j, other) in shares.iter().enumerate() {

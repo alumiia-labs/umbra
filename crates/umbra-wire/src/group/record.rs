@@ -353,6 +353,10 @@ pub struct KemSlot<'a> {
 }
 
 /// The length of a slot with `own_count` owner secrets.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "a count of one byte bounds the sum to some kilobytes"
+)]
 pub const fn slot_len(own_count: u8) -> usize {
     2 + slot::sealed_len(SLOT_PAYLOAD_FIXED + 32 * own_count as usize)
 }

@@ -37,16 +37,23 @@ impl Matrix {
         }
     }
 
+    /// The place of a cell in `cells`. A place that does not fit is outside
+    /// the array, thus the reader gets no cell.
+    const fn cell(&self, r: usize, c: usize) -> usize {
+        r.saturating_mul(self.k).saturating_add(c)
+    }
+
     // An index outside the matrix is a defect of this file. A debug build
     // stops on it, and a release build keeps the total behavior.
     fn at(&self, r: usize, c: usize) -> u16 {
         debug_assert!(r < self.k && c < self.k);
-        self.cells.get(r * self.k + c).copied().unwrap_or(0)
+        self.cells.get(self.cell(r, c)).copied().unwrap_or(0)
     }
 
     fn set(&mut self, r: usize, c: usize, v: u16) {
         debug_assert!(r < self.k && c < self.k);
-        if let Some(cell) = self.cells.get_mut(r * self.k + c) {
+        let place = self.cell(r, c);
+        if let Some(cell) = self.cells.get_mut(place) {
             *cell = v;
         }
     }
@@ -111,7 +118,7 @@ pub struct Code {
 impl Code {
     /// Chunks in total.
     pub const fn n(self) -> usize {
-        self.k + self.r
+        self.k.saturating_add(self.r)
     }
 
     /// Row `i` of the systematic generator matrix: for `i < k` the unit row,
@@ -150,7 +157,9 @@ impl Code {
     /// Writes the `r` parity chunks of `data` into `parity`. `data` holds `k`
     /// chunks of `w` bytes in order; `parity` holds `r` chunks of `w` bytes.
     pub fn encode(self, w: usize, data: &[u8], parity: &mut [u8]) -> Result<(), Error> {
-        if !w.is_multiple_of(2) || data.len() != self.k * w || parity.len() != self.r * w {
+        let data_len = self.k.checked_mul(w).ok_or(Error::Length)?;
+        let parity_len = self.r.checked_mul(w).ok_or(Error::Length)?;
+        if !w.is_multiple_of(2) || data.len() != data_len || parity.len() != parity_len {
             return Err(Error::Length);
         }
 
@@ -158,7 +167,7 @@ impl Code {
         let mut coeff = [0u16; MAX_K];
 
         for p in 0..self.r {
-            self.row(&inv_top, self.k + p, &mut coeff);
+            self.row(&inv_top, self.k.saturating_add(p), &mut coeff);
             for sym in 0..w / 2 {
                 let mut acc = 0u16;
                 for (m, c) in coeff.iter().enumerate().take(self.k) {
@@ -180,16 +189,17 @@ impl Code {
         received: &[u8],
         out: &mut [u8],
     ) -> Result<(), Error> {
+        let data_len = self.k.checked_mul(w).ok_or(Error::Length)?;
         if !w.is_multiple_of(2)
             || positions.len() != self.k
-            || received.len() != self.k * w
-            || out.len() != self.k * w
+            || received.len() != data_len
+            || out.len() != data_len
         {
             return Err(Error::Length);
         }
 
         for (i, &p) in positions.iter().enumerate() {
-            if p >= self.n() || positions.iter().skip(i + 1).any(|&q| q == p) {
+            if p >= self.n() || positions.iter().skip(i.saturating_add(1)).any(|&q| q == p) {
                 return Err(Error::Length);
             }
         }
@@ -220,19 +230,29 @@ impl Code {
     }
 }
 
+/// The place of symbol `sym` of chunk `chunk`. A place that does not fit is
+/// outside each buffer, thus the reader gets no symbol.
+const fn symbol_at(chunk: usize, w: usize, sym: usize) -> usize {
+    chunk
+        .saturating_mul(w)
+        .saturating_add(sym.saturating_mul(2))
+}
+
 fn symbol(chunks: &[u8], chunk: usize, w: usize, sym: usize) -> u16 {
-    let at = chunk * w + 2 * sym;
-    debug_assert!(at + 1 < chunks.len());
-    match (chunks.get(at), chunks.get(at + 1)) {
-        (Some(&hi), Some(&lo)) => u16::from_be_bytes([hi, lo]),
+    let at = symbol_at(chunk, w, sym);
+    let end = at.saturating_add(2);
+    debug_assert!(end <= chunks.len());
+    match chunks.get(at..end) {
+        Some(&[hi, lo]) => u16::from_be_bytes([hi, lo]),
         _ => 0,
     }
 }
 
 fn put_symbol(chunks: &mut [u8], chunk: usize, w: usize, sym: usize, v: u16) {
-    let at = chunk * w + 2 * sym;
-    debug_assert!(at + 1 < chunks.len());
-    if let Some(cell) = chunks.get_mut(at..at + 2) {
+    let at = symbol_at(chunk, w, sym);
+    let end = at.saturating_add(2);
+    debug_assert!(end <= chunks.len());
+    if let Some(cell) = chunks.get_mut(at..end) {
         cell.copy_from_slice(&v.to_be_bytes());
     }
 }

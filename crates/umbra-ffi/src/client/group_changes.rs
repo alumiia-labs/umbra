@@ -76,7 +76,13 @@ fn orphan_count(row: Option<&[u8]>, now: u64) -> (u64, u32) {
     });
 
     match parsed {
-        Some((start, count)) if start <= now && now - start < REF_ORPHAN_TTL => (start, count),
+        Some((start, count))
+            if now
+                .checked_sub(start)
+                .is_some_and(|age| age < REF_ORPHAN_TTL) =>
+        {
+            (start, count)
+        }
         _ => (now, 0),
     }
 }

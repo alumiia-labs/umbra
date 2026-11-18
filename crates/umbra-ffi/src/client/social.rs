@@ -87,7 +87,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let code = self.recovery_code(rng)?;
-        let mut coeffs = Zeroizing::new(vec![0u8; usize::from(threshold - 1) * 16]);
+        let mut coeffs = Zeroizing::new(vec![
+            0u8;
+            usize::from(threshold.saturating_sub(1))
+                .saturating_mul(16)
+        ]);
         rng.fill_bytes(&mut coeffs);
 
         // IDN-084, IDN-085: the social half alone goes into a share.

@@ -672,7 +672,7 @@ impl GroupService {
             None => self.waiting.iter().copied().collect(),
         };
 
-        let share = (left / order.len().max(1)).max(1);
+        let share = left.checked_div(order.len()).unwrap_or(left).max(1);
         let mut out = Vec::new();
         // The last group queue that took a digest in the turns of the
         // shares.

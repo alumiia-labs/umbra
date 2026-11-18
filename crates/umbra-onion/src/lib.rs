@@ -15,6 +15,7 @@
 //! no key update, thus their owners must not continue after a rejection.
 #![forbid(unsafe_code)]
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
 pub mod build;
 pub mod circuit;

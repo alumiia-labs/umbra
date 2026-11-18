@@ -635,7 +635,7 @@ async fn session(
         }
         let events = tokio::select! {
             received = link.recv() => match received {
-                Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
+                Ok(bytes) => match node.on_capsule(&bytes, crate::clock::unix_now(), &mut rng) {
                     Ok(events) => events,
                     Err(_) => break 'run End::Lost,
                 },
@@ -648,7 +648,7 @@ async fn session(
                     let _ = node.retry_watches(&mut rng);
                 }
                 // NET-370: a circuit keeps the age that its relays count.
-                let now = crate::runtime::unix_now();
+                let now = crate::clock::unix_now();
                 if let Some(step) = circuit_clock.step(now) {
                     node.circuit_clock_moved(step);
                 }

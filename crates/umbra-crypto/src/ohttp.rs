@@ -127,7 +127,11 @@ pub fn encapsulate_request<R: CryptoRng + ?Sized>(
     let (enc, mut context) =
         hpke::setup_sender::<UmbraKem, Sha3_256, R>(public, &request_info(&head), rng)?;
 
-    let capacity = head.len() + enc.len() + request.len().saturating_add(hpke::TAG_LEN);
+    let capacity = head
+        .len()
+        .saturating_add(enc.len())
+        .saturating_add(request.len())
+        .saturating_add(hpke::TAG_LEN);
     let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(&head);
     out.extend_from_slice(&enc);
@@ -180,7 +184,8 @@ pub fn encapsulate_response<R: CryptoRng + ?Sized>(
     let (aead_key, aead_nonce) = key.keys(&nonce)?;
 
     // The body seals in place inside the output, thus one buffer serves.
-    let mut out = Vec::with_capacity(RESPONSE_NONCE_LEN + response.len() + aead::TAG_LEN);
+    let mut out =
+        Vec::with_capacity((RESPONSE_NONCE_LEN + aead::TAG_LEN).saturating_add(response.len()));
     out.extend_from_slice(&nonce);
     out.extend_from_slice(response);
     let body = out.get_mut(RESPONSE_NONCE_LEN..).ok_or(Error::Length)?;

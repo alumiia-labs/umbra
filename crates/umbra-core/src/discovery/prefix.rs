@@ -21,7 +21,7 @@ pub const DEPTH_MAX: usize = 256;
 fn bit(index: &[u8; 32], depth: usize) -> bool {
     index
         .get(depth / 8)
-        .is_some_and(|byte| (byte >> (7 - depth % 8)) & 1 == 1)
+        .is_some_and(|byte| (byte >> 7usize.saturating_sub(depth % 8)) & 1 == 1)
 }
 
 /// `index` with each bit at position `depth` or later cleared.
@@ -34,7 +34,7 @@ fn prefix_of(index: &[u8; 32], depth: usize) -> [u8; 32] {
         } else if first_bit >= depth {
             0
         } else {
-            byte & !(0xFFu8 >> (depth - first_bit))
+            byte & !(0xFFu8 >> depth.saturating_sub(first_bit))
         };
     }
     prefix
@@ -95,7 +95,10 @@ impl PrefixProof {
             Terminal::Empty => 0,
             Terminal::Other { .. } => 64,
         };
-        1 + terminal + 2 + self.siblings.len().saturating_mul(32)
+        1usize
+            .saturating_add(terminal)
+            .saturating_add(2)
+            .saturating_add(self.siblings.len().saturating_mul(32))
     }
 
     /// Whether the proof holds no sibling, which is the proof of a tree
@@ -242,7 +245,7 @@ fn prefix_end(index: &[u8; 32], depth: usize) -> [u8; 32] {
         if first_bit >= depth {
             *byte = 0xFF;
         } else if first_bit.saturating_add(8) > depth {
-            *byte |= 0xFFu8 >> (depth - first_bit);
+            *byte |= 0xFFu8 >> depth.saturating_sub(first_bit);
         }
     }
     end

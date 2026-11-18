@@ -339,7 +339,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let field = |range: core::ops::Range<usize>| value.get(range).ok_or(Error::Integrity);
             let at: [u8; 8] = field(16..24)?.try_into().map_err(|_| Error::Integrity)?;
             let count = |at: usize| -> Result<u16, Error> {
-                let bytes: [u8; 2] = field(at..at + 2)?
+                let bytes: [u8; 2] = field(at..at.saturating_add(2))?
                     .try_into()
                     .map_err(|_| Error::Integrity)?;
                 Ok(u16::from_be_bytes(bytes))

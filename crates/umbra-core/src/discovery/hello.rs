@@ -42,7 +42,11 @@ pub struct HelloBody<'a> {
 impl<'a> HelloBody<'a> {
     /// The plaintext length.
     pub fn len(&self) -> usize {
-        2 + self.bundle.len() + 2 + self.profile.len() + self.admission.len()
+        2usize
+            .saturating_add(self.bundle.len())
+            .saturating_add(2)
+            .saturating_add(self.profile.len())
+            .saturating_add(self.admission.len())
     }
 
     /// Whether the plaintext has no byte. It holds its two length fields
@@ -112,7 +116,7 @@ pub fn seal<R: CryptoRng + ?Sized>(
     let mut nonce = [0u8; 24];
     rng.fill_bytes(&mut nonce);
 
-    let mut out = alloc::vec![0u8; HEADER_LEN + body.len() + aead::TAG_LEN];
+    let mut out = alloc::vec![0u8; body.len().saturating_add(const { HEADER_LEN + aead::TAG_LEN })];
     let mut w = Writer::new(&mut out);
     w.u8(VERSION)?;
     w.put(ct.as_bytes())?;

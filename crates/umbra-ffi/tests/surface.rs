@@ -2,7 +2,9 @@
 //! launch, a draft, a send, a render, a lock, and an unlock over a SQLite
 //! file.
 
-#![cfg(feature = "bindings")]
+// The contact of the first test comes from a hook that only a build with
+// `sockets-test` holds.
+#![cfg(all(feature = "bindings", feature = "sockets-test"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -60,7 +62,7 @@ fn the_surface_runs_a_first_launch_a_send_and_a_second_launch() {
 
     // The first launch makes the store, and the client is unlocked.
     let handle = init(config.clone(), keystore(), units("correct horse")).unwrap();
-    let conversation = vec![9u8; 16];
+    let conversation = handle.stored_contact_for_test([9; 32]).unwrap();
     let draft = handle.new_draft(conversation.clone()).unwrap();
     draft.set_text(units("over the surface")).unwrap();
     let message = handle.send_draft(draft.clone()).unwrap();

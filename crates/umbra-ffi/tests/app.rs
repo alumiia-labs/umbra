@@ -559,14 +559,10 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     assert!(!second.outgoing && second.delivery == 2);
     assert!(first.stored_at_ms <= second.stored_at_ms);
 
-    // A draft for no contact fails, and the network stays up.
+    // A draft for no contact is refused, and the network stays up.
     let draft = alice.new_draft(vec![0xEE; 16]).unwrap();
     draft.set_text(units("nobody")).unwrap();
-    alice.send_draft(draft).unwrap();
-    wait_for(&alice, |event| match event {
-        FfiEvent::Delivery { state: 4, .. } => Some(()),
-        _ => None,
-    });
+    assert_eq!(alice.send_draft(draft).err(), Some(FfiError::NotFound));
 
     let say = |from: &Handle, conversation: &[u8], words: &str| {
         let draft = from.new_draft(conversation.to_vec()).unwrap();

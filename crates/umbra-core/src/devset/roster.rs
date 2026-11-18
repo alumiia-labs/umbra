@@ -177,7 +177,7 @@ impl<'a> Roster<'a> {
             if self
                 .claims
                 .iter()
-                .skip(i + 1)
+                .skip(i.saturating_add(1))
                 .any(|b| b.subject == a.subject)
             {
                 return Err(Error::Malformed);
@@ -234,7 +234,7 @@ impl<'a> Roster<'a> {
         self.put_signed(&mut w)?;
         let n = w.position();
 
-        let mut out = Vec::with_capacity(labels::DEVICE_ROSTER.len() + n);
+        let mut out = Vec::with_capacity(labels::DEVICE_ROSTER.len().saturating_add(n));
         out.extend_from_slice(labels::DEVICE_ROSTER);
         out.extend_from_slice(body.get(..n).ok_or(Error::Malformed)?);
         Ok(out)
@@ -427,8 +427,14 @@ impl Parent {
 
     /// The encoding for the store.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let len =
-            8 + 32 + 2 + self.revoked.len() * 16 + self.signers.len() * (16 + VERIFYING_KEY_LEN);
+        let revoked_len = self.revoked.len().saturating_mul(16);
+        let signers_len = self
+            .signers
+            .len()
+            .saturating_mul(const { 16 + VERIFYING_KEY_LEN });
+        let len = (8usize + 32 + 2)
+            .saturating_add(revoked_len)
+            .saturating_add(signers_len);
         let mut out = alloc::vec![0u8; len];
         let mut w = Writer::new(&mut out);
         w.put(&self.epoch.to_be_bytes())?;

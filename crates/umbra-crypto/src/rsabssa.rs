@@ -323,7 +323,7 @@ fn pss_encode(msg: &[u8], salt: &[u8; SALT_LEN], em_len: usize) -> Vec<u8> {
     if let Some(marker) = db.get_mut(ps_len) {
         *marker = 0x01;
     }
-    if let Some(tail) = db.get_mut(ps_len + 1..) {
+    if let Some(tail) = db.get_mut(ps_len.saturating_add(1)..) {
         tail.copy_from_slice(salt);
     }
 
@@ -349,7 +349,9 @@ fn pss_verify(msg: &[u8], em: &[u8]) -> Result<(), Error> {
 
     let db_len = em.len().saturating_sub(HASH_LEN + 1);
     let masked_db = em.get(..db_len).ok_or(Error::Signature)?;
-    let h = em.get(db_len..db_len + HASH_LEN).ok_or(Error::Signature)?;
+    let h = em
+        .get(db_len..db_len.saturating_add(HASH_LEN))
+        .ok_or(Error::Signature)?;
     if masked_db.first().is_none_or(|b| b & 0x80 != 0) {
         return Err(Error::Signature);
     }
@@ -368,7 +370,7 @@ fn pss_verify(msg: &[u8], em: &[u8]) -> Result<(), Error> {
         return Err(Error::Signature);
     }
 
-    let salt = db.get(ps_len + 1..).ok_or(Error::Signature)?;
+    let salt = db.get(ps_len.saturating_add(1)..).ok_or(Error::Signature)?;
     if bool::from(m_prime_hash(msg, salt).ct_eq(h)) {
         Ok(())
     } else {

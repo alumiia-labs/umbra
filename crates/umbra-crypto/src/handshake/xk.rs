@@ -247,7 +247,7 @@ impl Initiator {
             return Err(Error::Length);
         }
 
-        let total = FLIGHT1_FIXED + NONCE_LEN + app_1.len() + PAYLOAD_OVERHEAD;
+        let total = (FLIGHT1_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD).saturating_add(app_1.len());
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let mut st = init(
             MODE,
@@ -309,7 +309,7 @@ impl Initiator {
         // 6. payload1
         let mut n_hs = [0u8; NONCE_LEN];
         rng.fill_bytes(&mut n_hs);
-        let (pt, tag_out) = rest.split_at_mut(NONCE_LEN + app_1.len());
+        let (pt, tag_out) = rest.split_at_mut(NONCE_LEN.saturating_add(app_1.len()));
         {
             let (nonce_out, app_out) = pt.split_at_mut(NONCE_LEN);
             nonce_out.copy_from_slice(&n_hs);
@@ -418,7 +418,10 @@ impl Initiator {
         st.trace(trace, "2.4 tag2");
 
         // 5. payload2
-        let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
+        let ct_len = payload_len
+            .checked_sub(PAYLOAD_OVERHEAD)
+            .ok_or(Error::Length)?;
+        let (ct, tag) = payload.split_at(ct_len);
         // The plaintext holds the app payload, such as the keys of a queue.
         let mut buf = Zeroizing::new([0u8; NONCE_LEN + MAX_APP_LEN]);
         let buf = buf.get_mut(..ct.len()).ok_or(Error::Length)?;
@@ -445,7 +448,7 @@ impl Initiator {
         if self.er.is_none() {
             return Err(Error::Handshake);
         }
-        if out_len < FLIGHT3_FIXED + app_len + PAYLOAD_OVERHEAD {
+        if out_len < (FLIGHT3_FIXED + PAYLOAD_OVERHEAD).saturating_add(app_len) {
             return Err(Error::Length);
         }
         Ok(())
@@ -463,7 +466,7 @@ impl Initiator {
         trace: &mut T,
     ) -> Result<(SessionKeys, usize), Error> {
         let er = &self.er.ok_or(Error::Handshake)?;
-        let total = FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD;
+        let total = (FLIGHT3_FIXED + PAYLOAD_OVERHEAD).saturating_add(app_3.len());
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let st = &mut self.st;
 
@@ -556,8 +559,13 @@ impl Responder {
             return Err(Error::Handshake);
         }
 
-        let payload_len = flight.len() - FLIGHT1_FIXED;
-        let app_len = payload_len - NONCE_LEN - PAYLOAD_OVERHEAD;
+        let payload_len = flight
+            .len()
+            .checked_sub(FLIGHT1_FIXED)
+            .ok_or(Error::Length)?;
+        let app_len = payload_len
+            .checked_sub(NONCE_LEN + PAYLOAD_OVERHEAD)
+            .ok_or(Error::Length)?;
         let app_out = app_out.get_mut(..app_len).ok_or(Error::Length)?;
 
         let s = s_r.x25519_public();
@@ -599,7 +607,10 @@ impl Responder {
         st.open(&mut [], tag1)?;
         st.trace(trace, "1.5 tag1");
 
-        let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
+        let ct_len = payload_len
+            .checked_sub(PAYLOAD_OVERHEAD)
+            .ok_or(Error::Length)?;
+        let (ct, tag) = payload.split_at(ct_len);
         // The plaintext holds the app payload, such as the keys of a queue.
         let mut buf = Zeroizing::new([0u8; NONCE_LEN + MAX_APP_LEN]);
         let buf = buf.get_mut(..ct.len()).ok_or(Error::Length)?;
@@ -636,7 +647,7 @@ impl Responder {
             return Err(Error::Length);
         }
 
-        let total = FLIGHT2_FIXED + NONCE_LEN + app_2.len() + PAYLOAD_OVERHEAD;
+        let total = (FLIGHT2_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD).saturating_add(app_2.len());
         let out = out.get_mut(..total).ok_or(Error::Length)?;
 
         // The flight goes on a copy, thus a step that fails leaves the
@@ -675,7 +686,7 @@ impl Responder {
         st.trace(trace, "2.4 tag2");
 
         // 5. payload2
-        let (pt, tag) = rest.split_at_mut(NONCE_LEN + app_2.len());
+        let (pt, tag) = rest.split_at_mut(NONCE_LEN.saturating_add(app_2.len()));
         {
             let (nonce_out, app_out) = pt.split_at_mut(NONCE_LEN);
             nonce_out.copy_from_slice(&self.n_hs);

@@ -4,6 +4,7 @@
 //! then verifies a token of that epoch under that key, and a key that no
 //! head of the log names admits nothing.
 
+use crate::clock::unix_now;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -44,12 +45,6 @@ impl IssuerReader {
             held: Mutex::new(None),
         }
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 impl LogChannel for IssuerReader {
