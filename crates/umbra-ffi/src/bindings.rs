@@ -412,6 +412,16 @@ pub struct FfiGroupMember {
     pub contact: Option<Vec<u8>>,
 }
 
+/// A contact of this device that was a member of a group, with the index
+/// that it held.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiFormerMember {
+    /// The member index, which the group gives to no other member.
+    pub index: u16,
+    /// The contact that held the index.
+    pub contact: Vec<u8>,
+}
+
 /// One relay of the set of the client, with the facts that the invariants
 /// of Part 3 §3.4.6 test.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -7523,6 +7533,24 @@ impl Handle {
                 },
                 is_self: member.is_self,
                 contact: member.contact.map(|held| held.0.to_vec()),
+            })
+            .collect())
+    }
+
+    /// The contacts of this device that left a group, thus a view names
+    /// the sender of an earlier message.
+    pub fn group_former_members(
+        &self,
+        conversation: Vec<u8>,
+    ) -> Result<Vec<FfiFormerMember>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner)
+            .client
+            .former_member_contacts(conversation)?
+            .into_iter()
+            .map(|(index, contact)| FfiFormerMember {
+                index,
+                contact: contact.0.to_vec(),
             })
             .collect())
     }

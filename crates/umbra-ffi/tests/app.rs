@@ -3574,7 +3574,10 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     });
     let draft = tablet.new_draft(alice_conversation.clone()).unwrap();
     draft.set_text(units("from a removed tablet")).unwrap();
-    tablet.send_draft(draft).unwrap();
+    // DEV-181: a tablet that learned of its removal refuses the send. One
+    // that did not learn of it yet stores a message that reaches nobody.
+    let sent = tablet.send_draft(draft);
+    assert!(matches!(sent, Ok(_) | Err(FfiError::Refused)));
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
         if let Some(FfiEvent::Message { message, .. }) = tablet.wait_event(200) {

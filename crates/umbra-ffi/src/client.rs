@@ -1634,6 +1634,40 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<Error>, Error> {
+        let (context, timers) = self.batch_context(records, now_ms)?;
+        let open = self.open_mut()?;
+
+        let mut plan = BatchPlan {
+            timers,
+            ..BatchPlan::default()
+        };
+        plan_changes(open, &mut plan.planned, changes);
+        for (index, record) in records.iter().enumerate() {
+            let place = places.get(index).copied().flatten();
+            plan_record(open, &context, &mut plan, record, place)?;
+        }
+
+        // A clear of a conversation keeps the messages that this batch
+        // stored after it. A receipt below stores no message, thus its
+        // writes are not in that range.
+        let read_from = plan.planned.len();
+        plan_reads(open, &mut plan)?;
+
+        let copies = pending_copies(open, &plan.to_publish, now_ms)?;
+        write_batch(open, &plan, replayed, &copies, rng)?;
+        self.events.extend(core::mem::take(&mut plan.events));
+
+        Ok(self.after_batch(plan, read_from, now_ms, rng))
+    }
+
+    /// Reads what the plan of a batch needs before the plan borrows the
+    /// store. The second value is the timer of each conversation of the
+    /// records.
+    fn batch_context(
+        &self,
+        records: &[Record],
+        now_ms: u64,
+    ) -> Result<(BatchContext, BTreeMap<ConversationId, u32>), Error> {
         let owns = self.owns_channels()?;
         let device_peers = self.device_peers()?;
         let mut sends_delivery = Vec::new();
@@ -1659,1205 +1693,48 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
-        let mut digests: Vec<DigestBody> = Vec::new();
-        let mut to_publish: Vec<(ConversationId, &[u8])> = Vec::new();
-        let mut handoffs: Vec<Outgoing> = Vec::new();
-
         // IMP-167, IMP-168: a file above this size waits for a tap.
         let limit = self.download_limit_now()?;
-        let open = self.open_mut()?;
 
-        // The batch borrows the store, thus each row identifier and each
-        // duplicate check comes first.
-        enum Planned {
-            Put(TableId, RowId, Option<RowId>, Zeroizing<Vec<u8>>),
-            Delete(TableId, RowId),
-        }
-
-        /// The newest write of this batch to a row: the value of a put, or
-        /// none for a deletion. The outer none is a row that the batch does
-        /// not touch, thus the store holds its value.
-        fn planned_row(
-            planned: &[Planned],
-            table: TableId,
-            row: RowId,
-        ) -> Option<Option<Zeroizing<Vec<u8>>>> {
-            planned.iter().rev().find_map(|write| match write {
-                Planned::Put(at_table, at, _, value) if *at_table == table && *at == row => {
-                    Some(Some(value.clone()))
-                }
-                Planned::Delete(at_table, at) if *at_table == table && *at == row => Some(None),
-                _ => None,
-            })
-        }
-
-        let mut planned = Vec::new();
-        let mut wanted: Vec<DownloadJob> = Vec::new();
-        let mut control: Vec<(ConversationId, &[u8])> = Vec::new();
-
-        // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
-        let mut key_requests: Vec<(ConversationId, &[u8])> = Vec::new();
-        let mut votes: Vec<(ConversationId, &[u8], u16)> = Vec::new();
-        let mut key_changes: Vec<(ConversationId, &[u8])> = Vec::new();
-        let mut shares: Vec<(ConversationId, &[u8])> = Vec::new();
-        let mut intros: Vec<(ConversationId, &[u8])> = Vec::new();
-        let mut supplies: Vec<(ConversationId, &[u8])> = Vec::new();
-
-        for change in changes {
-            planned.push(match change {
-                StateChange::Contact { contact, state } => Planned::Put(
-                    TableId::CONTACT,
-                    open.store.row_id(TableId::CONTACT, &contact.0),
-                    None,
-                    Zeroizing::new([contact.0.as_slice(), state].concat()),
-                ),
-                StateChange::Invitation { queue, state } => Planned::Put(
-                    INVITATION,
-                    open.store.row_id(INVITATION, queue),
-                    None,
-                    Zeroizing::new([queue.as_slice(), state].concat()),
-                ),
-                StateChange::InvitationEnded { queue } => {
-                    Planned::Delete(INVITATION, open.store.row_id(INVITATION, queue))
-                }
-                StateChange::NotifyQueue { queue, state } => Planned::Put(
-                    NOTIFY_STATE,
-                    open.store.row_id(NOTIFY_STATE, queue),
-                    None,
-                    Zeroizing::new([queue.as_slice(), state].concat()),
-                ),
-                StateChange::NotifyQueueEnded { queue } => {
-                    Planned::Delete(NOTIFY_STATE, open.store.row_id(NOTIFY_STATE, queue))
-                }
-                StateChange::RendezvousQueue { queue, state } => Planned::Put(
-                    discovery::RENDEZVOUS_STATE,
-                    open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
-                    None,
-                    Zeroizing::new([queue.as_slice(), state].concat()),
-                ),
-                StateChange::RendezvousQueueEnded { queue } => Planned::Delete(
-                    discovery::RENDEZVOUS_STATE,
-                    open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
-                ),
-            });
-        }
-
-        let mut events = Vec::new();
-        let mut owner_fault = false;
-        let mut target_fault = false;
-        let mut delivered: Vec<(RowId, Delivery)> = Vec::new();
-
-        // What this batch plans and the store does not hold yet. The plan
-        // holds the count and the mark of each revised message, each
-        // pending reference, and the reactions that each party adds to each
-        // message.
-        let mut revised: BTreeMap<RowId, (u8, Option<SyncPlace>)> = BTreeMap::new();
-        let mut pended: BTreeMap<RowId, (ConversationId, Zeroizing<Vec<u8>>)> = BTreeMap::new();
-        let mut reacted: BTreeMap<(RowId, u8), usize> = BTreeMap::new();
-
-        // The reactions and the count of the pending references that the
-        // store holds for each conversation. One read serves each record of
-        // the batch. A contact sets the count of the records, and a read
-        // for each one would cost the count times the size of the table.
-        let mut stored_reactions: BTreeMap<ConversationId, StoredReactions> = BTreeMap::new();
-        let mut stored_pending: BTreeMap<ConversationId, usize> = BTreeMap::new();
-
-        // The forward policy of each conversation that this batch moves.
-        let mut forwards: BTreeMap<ConversationId, ForwardSetting> = BTreeMap::new();
-
-        // DEV-335: each deletion of a whole conversation, with its bound and
-        // the count of the writes that this batch planned before it.
-        let mut clears: Vec<(ConversationId, &[u8], [u8; 16], usize)> = Vec::new();
-
-        // The messages that a deletion of this batch overwrote, whose copies
-        // for the other devices of the set go after the commit (`DEV-099`).
-        let mut erased: Vec<MsgRef> = Vec::new();
-
-        // The newest message that a read receipt of this batch named, for
-        // each conversation (`WIR-514`).
-        let mut read_up_to: BTreeMap<ConversationId, u64> = BTreeMap::new();
-        for (index, record) in records.iter().enumerate() {
-            let app = &record.app;
-            let conversation = record.conversation;
-            let from_user = record.from_user;
-            let place = places.get(index).copied().flatten();
-
-            // A record whose app does not parse is one silent drop, as
-            // GRP-251 has it for a group. A fault here would end the commit
-            // of the batch, and no ACK would leave. The relay would give
-            // the record again at each connection, and one record of a
-            // contact would stop the client for good.
-            let Ok(parsed) = AppMessage::parse(app, Channel::Pairwise) else {
-                continue;
-            };
-
-            // DEV-052: a sync channel carries kind 0x20 alone, and no view
-            // shows its records.
-            if device_peers.contains(&conversation) {
-                if parsed.kind == AppKind::DeviceSet {
-                    sync_bodies.push((conversation, parsed.body.to_vec()));
-                }
-                continue;
-            }
-
-            // DEV-050: kind 0x20 on a pairwise channel changes nothing.
-            if parsed.kind == AppKind::DeviceSet {
-                continue;
-            }
-
-            // DIS-033, REL-008: the digest of a contact is no message, and
-            // it compares after the batch. A body that does not parse goes.
-            if parsed.kind == AppKind::TransparencyDigest {
-                if !from_user && !blocked.contains(&conversation) {
-                    if let Ok(body) = DigestBody::parse(parsed.body) {
-                        digests.push(body);
-                    }
-                }
-                continue;
-            }
-
-            // WIR-176: a pairwise record names no member, and a poll that
-            // does not parse is no poll (WIR-180 to WIR-182).
-            // DEV-174: a rich record of a pairwise channel goes around a
-            // text. Thus one around another kind, or around bytes that are
-            // no UTF-8, is no message.
-            let is_invalid = match parsed.kind {
-                AppKind::Rich => {
-                    RichRecord::parse(parsed.body, Channel::Pairwise).map_or(true, |rich| {
-                        rich.inner_kind != AppKind::Text
-                            || core::str::from_utf8(rich.inner_body).is_err()
-                    })
-                }
-                AppKind::Poll => Poll::parse(parsed.body).is_err(),
-                _ => false,
-            };
-            if is_invalid {
-                continue;
-            }
-
-            // ABU-027 to ABU-030: the record of a blocked contact goes,
-            // after its acknowledgment, with no view and no alert. A
-            // delivery receipt keeps the rate that held before the block.
-            // It names a record that the store would have kept as a
-            // message, and no other one. Thus a typing record or an edit of
-            // a blocked contact gets no receipt that it did not get before.
-            if !from_user && blocked.contains(&conversation) {
-                // WIR-339: a blocked contact that asks for a record of this
-                // device gets the answer that it got before the block.
-                if parsed.kind == AppKind::KeyRequest && !record.synced {
-                    key_requests.push((conversation, parsed.body));
-                    continue;
-                }
-
-                let is_kept = match parsed.kind {
-                    AppKind::Text | AppKind::Rich | AppKind::Attachment | AppKind::Poll => true,
-                    AppKind::ConversationTimer => timers::timer_body(parsed.body).is_some(),
-                    AppKind::ForwardPolicy => forward::policy_body(parsed.body).is_some(),
-                    _ => false,
-                };
-                if !record.synced && sends_delivery.contains(&conversation) && is_kept {
-                    let key =
-                        held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
-                    planned.push(Planned::Put(
-                        RECEIPT,
-                        open.store.row_id(RECEIPT, &key),
-                        Some(conversation.0),
-                        Zeroizing::new(held_receipt(
-                            conversation,
-                            AppKind::DeliveryReceipt,
-                            &parsed.msg_id,
-                            now_ms / 1_000,
-                        )),
-                    ));
-                }
-                continue;
-            }
-
-            // DEV-247: the owner of the channels forwards no revision that it
-            // rejected, thus the copy of an edit waits for its checks below.
-            let publishes = !record.synced && owns;
-            if publishes && parsed.kind != AppKind::Edit {
-                to_publish.push((conversation, app.as_slice()));
-            }
-
-            // The owner of the channels sends each record that a peer
-            // handed to it. The record of an edit, a deletion, or a reaction
-            // waits in a request row, as one of this device does.
-            let handoff = record.synced && from_user && owns;
-
-            // A row of the store reads back with its body, thus a handed
-            // record whose body does not parse is one drop and no row.
-            let is_unreadable = match parsed.kind {
-                AppKind::Delete => DeleteBody::parse(parsed.body).is_err(),
-                AppKind::Edit => EditBody::parse(parsed.body).is_err(),
-                _ => false,
-            };
-            if handoff && is_unreadable {
-                continue;
-            }
-
-            if handoff
-                && matches!(
-                    parsed.kind,
-                    AppKind::Reaction | AppKind::Edit | AppKind::Delete | AppKind::PollVote
-                )
-            {
-                let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
-                let natural = [conversation.0.as_slice(), &reference].concat();
-                let row = open.store.row_id(TableId::MESSAGE, &natural);
-                let queued = handoffs.iter().any(|held| held.message.0 == row);
-                if queued || open.store.get(TableId::MESSAGE, &row)?.is_some() {
-                    continue;
-                }
-
-                planned.push(Planned::Put(
-                    TableId::MESSAGE,
-                    row,
-                    Some(conversation.0),
-                    stored_message(
-                        OUTGOING,
-                        Delivery::Queued,
-                        conversation,
-                        open.stamp.next(now_ms),
-                        app,
-                    ),
-                ));
-                planned.push(Planned::Put(
-                    OUTBOX,
-                    row,
-                    None,
-                    Zeroizing::new(outbox_row()),
-                ));
-                handoffs.push(Outgoing {
-                    message: MsgRef(row),
-                    conversation,
-                    app: app.clone(),
-                });
-            }
-            let direction = if from_user { OUTGOING } else { INCOMING };
-            if let Some(reported) = Delivery::of_receipt(parsed.kind) {
-                // A receipt is no message. A body that does not parse
-                // changes nothing, and it ends no batch.
-                let targets =
-                    ReceiptBody::parse(parsed.body).map_or(Vec::new(), |body| body.targets);
-                let mut named = Vec::new();
-                for target in targets {
-                    let reference = msg_ref(&open.device_set_key, &target);
-                    let natural = [conversation.0.as_slice(), &reference].concat();
-                    let row = open.store.row_id(TableId::MESSAGE, &natural);
-                    let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
-                        continue;
-                    };
-                    let plain = Zeroizing::new(plain);
-
-                    // WIR-293: a receipt names a message of this device to
-                    // this peer.
-                    let Some(info) = target_info(&plain, &mut target_fault, &mut events)? else {
-                        continue;
-                    };
-                    if info.outgoing {
-                        named.push((row, plain, info));
-                    }
-                }
-
-                if reported == Delivery::Read && !named.is_empty() {
-                    // WIR-514: the peer saw each message up to the newest
-                    // one that the receipt names. The scan for them runs
-                    // after the loop, one time for each conversation. A
-                    // contact sends many receipts, and each one would read
-                    // each message of the conversation again.
-                    let mut up_to = 0;
-                    for (_, _, info) in &named {
-                        up_to = up_to.max(info.stored_at_ms);
-                    }
-                    let newest = read_up_to.entry(conversation).or_insert(0);
-                    *newest = (*newest).max(up_to);
-                }
-
-                for (row, mut plain, info) in named {
-                    // A state goes up only.
-                    if !info.delivery.is_below(reported) {
-                        continue;
-                    }
-                    write_delivery(&mut plain, reported)?;
-                    planned.push(Planned::Put(
-                        TableId::MESSAGE,
-                        row,
-                        Some(conversation.0),
-                        plain,
-                    ));
-                    planned.push(Planned::Delete(OUTBOX, row));
-                    delivered.push((row, reported));
-                    events.push(Event::Delivery {
-                        message: MsgRef(row),
-                        delivery: reported,
-                    });
-                }
-                continue;
-            }
-
-            if parsed.kind == AppKind::GroupControl {
-                // The join flow of Part 11 §11.9.1 runs after this loop,
-                // because it reads and writes groups of its own. The device
-                // that owns the channels runs it.
-                if !record.synced {
-                    control.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            if parsed.kind == AppKind::KeyRequest {
-                if !record.synced {
-                    key_requests.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            // WIR-459: the supply of a request of scope 0x01 comes on the
-            // channel of the request, and it is no message.
-            if parsed.kind == AppKind::KeySupply {
-                if !from_user && !record.synced {
-                    supplies.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            // WIR-287: a typing record of the contact moves a state of the
-            // view, and no store holds it. A group takes none (GRP-300).
-            if parsed.kind == AppKind::Typing {
-                if !from_user && !record.synced {
-                    if let Ok(state) = TypingState::parse(parsed.body) {
-                        events.push(Event::Typing {
-                            conversation,
-                            is_typing: state == TypingState::Started,
-                        });
-                    }
-                }
-                continue;
-            }
-
-            // IDN-059: a key-change notice of the contact comes on its
-            // receiving chain, and it waits for the user. It is no message.
-            if parsed.kind == AppKind::KeyChange {
-                if !from_user {
-                    key_changes.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            // WIR-196, WIR-358: a contact share is no message, and a request
-            // or an offer waits for the user.
-            if parsed.kind == AppKind::ContactShare {
-                if !from_user && !record.synced {
-                    intros.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            // IDN-189: a share of a contact is no message, and this device
-            // holds it for the day that contact needs it.
-            if parsed.kind == AppKind::RecoveryShare {
-                if !from_user {
-                    shares.push((conversation, parsed.body));
-                }
-                continue;
-            }
-
-            if parsed.kind == AppKind::PollVote {
-                // A vote is no message: it moves the count of its poll
-                // after the batch.
-                let voter = if from_user {
-                    polls::VOTER_SELF
-                } else {
-                    polls::VOTER_PEER
-                };
-                votes.push((conversation, parsed.body, voter));
-                continue;
-            }
-
-            if parsed.kind == AppKind::Reaction {
-                // A reaction is no message. One that does not parse, one
-                // with a text in the place of an emoji, and one to a message
-                // that this device does not hold change nothing (`WIR-282`).
-                let Ok(reaction) = ReactionBody::parse(parsed.body) else {
-                    continue;
-                };
-                if !is_emoji(reaction.emoji) {
-                    continue;
-                }
-
-                let reference = msg_ref(&open.device_set_key, &reaction.target);
-                let natural = [conversation.0.as_slice(), &reference].concat();
-                let target = open.store.row_id(TableId::MESSAGE, &natural);
-
-                // A target that came earlier in this batch is in the plan.
-                let held = match planned_row(&planned, TableId::MESSAGE, target) {
-                    Some(held) => held,
-                    None => open
-                        .store
-                        .get(TableId::MESSAGE, &target)?
-                        .map(Zeroizing::new),
-                };
-                let Some(held) = held else {
-                    continue;
-                };
-                let Some(info) = target_info(&held, &mut target_fault, &mut events)? else {
-                    continue;
-                };
-                if info.deleted || is_request(&held)? {
-                    continue;
-                }
-
-                let plain = reaction_row(conversation, &reference, direction, reaction.emoji);
-                let row = open.store.row_id(REACTION, &plain);
-                let exists = match planned_row(&planned, REACTION, row) {
-                    Some(held) => held.is_some(),
-                    None => open.store.get(REACTION, &row)?.is_some(),
-                };
-                match reaction.action {
-                    ReactionAction::Add if !exists => {
-                        if let Entry::Vacant(vacant) = stored_reactions.entry(conversation) {
-                            let listed = open.store.list(REACTION, Some(&conversation.0))?;
-                            vacant.insert(
-                                listed
-                                    .into_iter()
-                                    .map(|(held, other)| (held, Zeroizing::new(other)))
-                                    .collect(),
-                            );
-                        }
-
-                        let prefix = [reference.as_slice(), &[direction]].concat();
-                        let of_contact = stored_reactions.get(&conversation).map_or(0, |listed| {
-                            listed
-                                .iter()
-                                .filter(|(_, other)| {
-                                    other.get(16..REACTION_PREFIX) == Some(prefix.as_slice())
-                                })
-                                .count()
-                        });
-
-                        // The reactions that this batch adds count too.
-                        let added = reacted.entry((target, direction)).or_insert(0usize);
-                        if of_contact.saturating_add(*added) >= REACTIONS_MAX {
-                            continue;
-                        }
-                        *added = added.saturating_add(1);
-                        planned.push(Planned::Put(
-                            REACTION,
-                            row,
-                            Some(conversation.0),
-                            Zeroizing::new(plain),
-                        ));
-                    }
-                    // WIR-281: the same sender, emoji, and target.
-                    ReactionAction::Remove if exists => {
-                        planned.push(Planned::Delete(REACTION, row))
-                    }
-                    _ => continue,
-                }
-
-                events.push(Event::Reacted {
-                    conversation,
-                    message: MsgRef(target),
-                });
-                continue;
-            }
-
-            if parsed.kind == AppKind::Edit {
-                // An edit is no message. A body that does not parse
-                // changes nothing.
-                let Ok(edit) = EditBody::parse(parsed.body) else {
-                    continue;
-                };
-
-                let reference = msg_ref(&open.device_set_key, &edit.target);
-                let natural = [conversation.0.as_slice(), &reference].concat();
-                let row = open.store.row_id(TableId::MESSAGE, &natural);
-
-                // A target that came earlier in this batch is in the plan.
-                let target = match planned_row(&planned, TableId::MESSAGE, row) {
-                    Some(held) => held,
-                    None => open.store.get(TableId::MESSAGE, &row)?.map(Zeroizing::new),
-                };
-                match target {
-                    Some(plain) => {
-                        let Some(info) = target_info(&plain, &mut target_fault, &mut events)?
-                        else {
-                            continue;
-                        };
-
-                        // An earlier edit of this batch moved the count and
-                        // the mark, and the store does not hold them yet.
-                        let held = match revised.get(&row) {
-                            Some(held) => *held,
-                            None => revision_of(open.store.get(REVISION, &row)?.as_deref())?,
-                        };
-                        let (count, mark) = held;
-
-                        // WIR-082: the sender of the target alone. DEV-087:
-                        // inside the window from the store time of this
-                        // device. DEV-088: below the limit. DEV-246: a copy
-                        // from a sync channel passed the checks of the
-                        // device that took the revision. This device
-                        // measures no window and no limit for it.
-                        let in_window = now_ms.saturating_sub(info.clock_at_ms) < EDIT_WINDOW_MS;
-                        if info.outgoing != from_user
-                            || info.deleted
-                            || (!record.synced && (!in_window || count >= EDIT_MAX))
-                        {
-                            continue;
-                        }
-
-                        // DEV-034, DEV-035: a copy at or below the newest
-                        // revision that its source gave is an older text.
-                        // It never takes the place of a newer one. The
-                        // counters of two sources do not compare.
-                        let is_older = matches!(
-                            (place, mark),
-                            (Some((source, counter)), Some((held, newest)))
-                                if source == held && counter <= newest
-                        );
-                        if is_older {
-                            continue;
-                        }
-
-                        // WIR-260: a target with no text takes no edit. The
-                        // plan holds the text of an earlier edit of this
-                        // batch.
-                        let Ok(changed) = row_with_text(&plain, edit.new_body.as_bytes()) else {
-                            continue;
-                        };
-
-                        if publishes {
-                            to_publish.push((conversation, app.as_slice()));
-                        }
-
-                        // The earlier text goes: the row gets a new key.
-                        planned.push(Planned::Put(
-                            TableId::MESSAGE,
-                            row,
-                            Some(conversation.0),
-                            changed,
-                        ));
-                        let next = (count.saturating_add(1), place.or(mark));
-                        revised.insert(row, next);
-                        planned.push(Planned::Put(REVISION, row, None, revision_row(next)));
-                        events.push(Event::Edited {
-                            conversation,
-                            message: MsgRef(row),
-                        });
-                    }
-                    // DEV-093: the target did not arrive yet. A deletion
-                    // that waits for the same target stays.
-                    None => {
-                        let pending = open
-                            .store
-                            .row_id(PENDING, &pending_key(&natural, from_user));
-                        let is_deleted = match pended.get(&pending) {
-                            Some((_, entry)) => entry.len() == PENDING_ROW_LEN,
-                            None => open
-                                .store
-                                .get(PENDING, &pending)?
-                                .is_some_and(|entry| entry.len() == PENDING_ROW_LEN),
-                        };
-
-                        // DEV-095: the entries of this batch count too.
-                        let stored = match stored_pending.get(&conversation) {
-                            Some(count) => *count,
-                            None => {
-                                let count = open.store.count(PENDING, Some(&conversation.0))?;
-                                stored_pending.insert(conversation, count);
-                                count
-                            }
-                        };
-                        let held = stored.saturating_add(
-                            pended
-                                .values()
-                                .filter(|(held, _)| *held == conversation)
-                                .count(),
-                        );
-                        if is_deleted || held >= REF_ORPHAN_MAX {
-                            continue;
-                        }
-
-                        if publishes {
-                            to_publish.push((conversation, app.as_slice()));
-                        }
-
-                        let entry = Zeroizing::new(
-                            [
-                                conversation.0.as_slice(),
-                                &reference,
-                                &(now_ms / 1_000).to_be_bytes(),
-                                edit.new_body.as_bytes(),
-                            ]
-                            .concat(),
-                        );
-                        pended.insert(pending, (conversation, entry.clone()));
-                        planned.push(Planned::Put(PENDING, pending, Some(conversation.0), entry));
-                    }
-                }
-                continue;
-            }
-
-            if parsed.kind == AppKind::Delete {
-                // A deletion is no message. WIR-084: a contact deletes for
-                // the other party, and a record of another scope, or one
-                // that does not parse, changes nothing.
-                let body = DeleteBody::parse(parsed.body).ok();
-
-                // DEV-335: the contact deletes the whole conversation after
-                // this batch. A copy of a request of the user is no order:
-                // the deletions of scope 0x01 of DEV-333 reach this device.
-                if let Some(body) = body
-                    .as_ref()
-                    .filter(|body| body.scope == DeleteScope::Conversation)
-                {
-                    if let (false, Some(bound)) = (from_user, body.targets.first()) {
-                        clears.push((conversation, app.as_slice(), *bound, planned.len()));
-                    }
-                    continue;
-                }
-                let targets = match body {
-                    Some(body) if body.scope == DeleteScope::OtherParty => body.targets,
-                    _ => Vec::new(),
-                };
-                for target in targets {
-                    let reference = msg_ref(&open.device_set_key, &target);
-                    let natural = [conversation.0.as_slice(), &reference].concat();
-                    let row = open.store.row_id(TableId::MESSAGE, &natural);
-
-                    // A target that came earlier in this batch is in the
-                    // plan, and the store does not hold it yet.
-                    let held = match planned_row(&planned, TableId::MESSAGE, row) {
-                        Some(held) => held,
-                        None => open.store.get(TableId::MESSAGE, &row)?.map(Zeroizing::new),
-                    };
-                    match held {
-                        Some(plain) => {
-                            // DEV-081, DEV-085: the contact names a message
-                            // that the contact sent, and no other one.
-                            let Some(info) = target_info(&plain, &mut target_fault, &mut events)?
-                            else {
-                                continue;
-                            };
-                            if info.outgoing != from_user || info.deleted {
-                                continue;
-                            }
-
-                            planned.push(Planned::Put(
-                                TableId::MESSAGE,
-                                row,
-                                Some(conversation.0),
-                                placeholder_of(&plain)?,
-                            ));
-
-                            // A placeholder holds no reaction, no vote, no
-                            // poll, and no deadline.
-                            let mut gone: Vec<(TableId, RowId)> = Vec::new();
-                            if let Entry::Vacant(vacant) = stored_reactions.entry(conversation) {
-                                let listed = open.store.list(REACTION, Some(&conversation.0))?;
-                                vacant.insert(
-                                    listed
-                                        .into_iter()
-                                        .map(|(held, other)| (held, Zeroizing::new(other)))
-                                        .collect(),
-                                );
-                            }
-                            for (held, other) in
-                                stored_reactions.get(&conversation).into_iter().flatten()
-                            {
-                                if other.get(16..32) == Some(reference.as_slice()) {
-                                    gone.push((REACTION, *held));
-                                }
-                            }
-                            for write in &planned {
-                                if let Planned::Put(table, held, _, other) = write {
-                                    if *table == REACTION
-                                        && other.get(16..32) == Some(reference.as_slice())
-                                    {
-                                        gone.push((REACTION, *held));
-                                    }
-                                }
-                            }
-
-                            for (held, other) in
-                                open.store.list(polls::VOTES, Some(&conversation.0))?
-                            {
-                                if other.get(16..32) == Some(row.as_slice()) {
-                                    gone.push((polls::VOTES, held));
-                                }
-                            }
-
-                            // The contact uploaded the file, thus this device
-                            // holds no credential that erases a chunk. A
-                            // message of the user from another device leaves
-                            // no relay now.
-                            for table in [
-                                REVISION,
-                                FILE_STATE,
-                                FILE_DATA,
-                                polls::POLLS,
-                                timers::DEADLINES,
-                                OUTBOX,
-                            ] {
-                                gone.push((table, row));
-                            }
-                            planned.extend(
-                                gone.into_iter()
-                                    .map(|(table, held)| Planned::Delete(table, held)),
-                            );
-                            let message = MsgRef(row);
-                            wanted.retain(|job| job.message != message);
-                            handoffs.retain(|held| held.message != message);
-
-                            // DEV-099: no copy of the content goes to the
-                            // other devices of the set.
-                            to_publish.retain(|(held, copy)| {
-                                *held != conversation
-                                    || AppMessage::parse(copy, Channel::Pairwise)
-                                        .map_or(true, |copy| copy.msg_id != target)
-                            });
-
-                            // A message of this batch raises no alert now.
-                            events.retain(|event| {
-                                !matches!(event, Event::Message { message: m, .. } if *m == message)
-                            });
-                            events.push(Event::Deleted {
-                                conversation,
-                                message,
-                            });
-                            erased.push(message);
-                        }
-                        // DEV-093: the target did not arrive yet.
-                        None => {
-                            let stored = match stored_pending.get(&conversation) {
-                                Some(count) => *count,
-                                None => {
-                                    let count = open.store.count(PENDING, Some(&conversation.0))?;
-                                    stored_pending.insert(conversation, count);
-                                    count
-                                }
-                            };
-                            let held = stored.saturating_add(
-                                pended
-                                    .values()
-                                    .filter(|(held, _)| *held == conversation)
-                                    .count(),
-                            );
-                            if held >= REF_ORPHAN_MAX {
-                                continue;
-                            }
-
-                            let pending = open
-                                .store
-                                .row_id(PENDING, &pending_key(&natural, from_user));
-                            let entry = Zeroizing::new(
-                                [
-                                    conversation.0.as_slice(),
-                                    &reference,
-                                    &(now_ms / 1_000).to_be_bytes(),
-                                ]
-                                .concat(),
-                            );
-                            pended.insert(pending, (conversation, entry.clone()));
-                            planned.push(Planned::Put(
-                                PENDING,
-                                pending,
-                                Some(conversation.0),
-                                entry,
-                            ));
-                        }
-                    }
-                }
-                continue;
-            }
-
-            let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
-            let natural = [conversation.0.as_slice(), &reference].concat();
-            let row = open.store.row_id(TableId::MESSAGE, &natural);
-            let message = MsgRef(row);
-
-            // A deletion that came first takes the message at its arrival:
-            // the view shows nothing at that position (Part 7 §7.5.6).
-            // DEV-093: the entry of the party that sent the message alone.
-            // Thus an edit or a deletion of the contact takes no record of
-            // the user. An entry of an earlier build names no direction,
-            // and it came from the contact.
-            let mut pending = open
-                .store
-                .row_id(PENDING, &pending_key(&natural, from_user));
-            let mut waiting = match pended.remove(&pending) {
-                Some((_, entry)) => Some(entry),
-                None => open.store.get(PENDING, &pending)?.map(Zeroizing::new),
-            };
-            if waiting.is_none() && !from_user {
-                pending = open.store.row_id(PENDING, &natural);
-                waiting = open.store.get(PENDING, &pending)?.map(Zeroizing::new);
-            }
-
-            // DEV-093: a deletion of another device of the user came first.
-            // It takes the message, and an edit that waits goes with it.
-            let own = open.store.row_id(PENDING, &own_pending_key(&natural));
-            if let Some(entry) = open.store.get(PENDING, &own)?.map(Zeroizing::new) {
-                planned.push(Planned::Delete(PENDING, own));
-                let at = entry
-                    .get(32..PENDING_ROW_LEN)
-                    .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-                    .map_or(0, u64::from_be_bytes);
-                if (now_ms / 1_000).saturating_sub(at) < REF_ORPHAN_TTL {
-                    if waiting.is_some() {
-                        planned.push(Planned::Delete(PENDING, pending));
-                    }
-                    continue;
-                }
-            }
-
-            let mut edited_text = None;
-            if let Some(entry) = waiting {
-                let at: [u8; 8] = entry
-                    .get(32..PENDING_ROW_LEN)
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or(Error::Integrity)?;
-                planned.push(Planned::Delete(PENDING, pending));
-
-                // DEV-095: an entry above its time counts for nothing.
-                if (now_ms / 1_000).saturating_sub(u64::from_be_bytes(at)) < REF_ORPHAN_TTL {
-                    let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
-
-                    // An entry with no text is a deletion.
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    edited_text = Some(Zeroizing::new(text.to_vec()));
-                }
-            }
-
-            let in_batch = events.iter().any(|event| {
-                matches!(
-                    event,
-                    Event::Message { message: m, .. } | Event::Delivery { message: m, .. }
-                        if *m == message
-                )
-            });
-            if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
-                continue;
-            }
-
-            // DEV-205: either party sets the timer, and the record stays in
-            // the conversation as the mark of the change (`DEV-207`).
-            if parsed.kind == AppKind::ConversationTimer {
-                let Some(seconds) = timers::timer_body(parsed.body) else {
-                    continue;
-                };
-
-                timers.insert(conversation, seconds);
-                let setting = TimerSetting {
-                    seconds,
-                    set_at_ms: now_ms,
-                    by_user: from_user,
-                };
-                planned.push(Planned::Put(
-                    timers::TIMERS,
-                    open.store.row_id(timers::TIMERS, &conversation.0),
-                    Some(conversation.0),
-                    setting.encode(),
-                ));
-            }
-
-            // DEV-321, DEV-323: each party sets the policy of its own
-            // messages, and an older record changes nothing and is no row.
-            if parsed.kind == AppKind::ForwardPolicy {
-                let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body) else {
-                    continue;
-                };
-
-                let mut setting = match forwards.get(&conversation) {
-                    Some(held) => *held,
-                    None => forward::setting_in(&open.store, conversation)?,
-                };
-                if !setting.take(&policy, from_user) {
-                    continue;
-                }
-
-                forwards.insert(conversation, setting);
-                planned.push(Planned::Put(
-                    forward::FORWARD_POLICY,
-                    open.store.row_id(forward::FORWARD_POLICY, &conversation.0),
-                    Some(conversation.0),
-                    setting.encode(),
-                ));
-            }
-
-            // DEV-208, DEV-244: the period runs from the receive time here,
-            // and a sync copy brings the rest of its own.
-            let now = now_ms / 1_000;
-            let deadline = if !timers::is_timed_kind(parsed.kind) {
-                None
-            } else if record.synced {
-                (record.expires_in > 0).then(|| Deadline::from_sync(now, record.expires_in))
-            } else {
-                timers
-                    .get(&conversation)
-                    .filter(|seconds| **seconds > 0)
-                    .map(|seconds| Deadline::received(now, *seconds))
-            };
-            if let Some(deadline) = deadline {
-                planned.push(Planned::Put(
-                    timers::DEADLINES,
-                    row,
-                    Some(conversation.0),
-                    timers::deadline_row(conversation, deadline.at),
-                ));
-            }
-
-            if handoff {
-                // The record goes as the peer wrote it: its reply target
-                // becomes a reference at the send (`WIR-071`).
-                planned.push(Planned::Put(
-                    TableId::MESSAGE,
-                    row,
-                    Some(conversation.0),
-                    stored_message(
-                        OUTGOING,
-                        Delivery::Queued,
-                        conversation,
-                        open.stamp.next(now_ms),
-                        app,
-                    ),
-                ));
-                planned.push(Planned::Put(
-                    OUTBOX,
-                    row,
-                    None,
-                    Zeroizing::new(outbox_row()),
-                ));
-                if parsed.kind == AppKind::Attachment {
-                    let (state, _) = files::incoming_state_row(parsed.body, 0);
-                    planned.push(Planned::Put(
-                        FILE_STATE,
-                        row,
-                        Some(conversation.0),
-                        Zeroizing::new(state),
-                    ));
-                }
-
-                handoffs.push(Outgoing {
-                    message,
-                    conversation,
-                    app: app.clone(),
-                });
-                events.push(Event::Delivery {
-                    message,
-                    delivery: Delivery::Queued,
-                });
-                continue;
-            }
-
-            let mut kept = Zeroizing::new(app.clone());
-
-            // An edit that came first gives the message its text and the
-            // edited mark. A target with no text keeps what it has.
-            if let Some(text) = edited_text {
-                if let Ok(changed) = with_text(&kept, &text) {
-                    kept = changed;
-                    revised.insert(row, (1, None));
-                    planned.push(Planned::Put(REVISION, row, None, Zeroizing::new(vec![1])));
-                }
-            }
-
-            keep_reply_as_reference(&mut kept, &open.device_set_key)?;
-
-            // A record of the user from another device left the owner of
-            // the channels, or waits there.
-            let delivery = if from_user {
-                Delivery::Accepted
-            } else {
-                Delivery::Delivered
-            };
-            planned.push(Planned::Put(
-                TableId::MESSAGE,
-                row,
-                Some(conversation.0),
-                stored_message(
-                    direction,
-                    delivery,
-                    conversation,
-                    open.stamp.next(now_ms),
-                    &kept,
-                ),
-            ));
-
-            // WIR-187: the period of a poll runs from its receive time.
-            if parsed.kind == AppKind::Poll {
-                let open_seconds = Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
-                planned.push(Planned::Put(
-                    polls::POLLS,
-                    row,
-                    Some(conversation.0),
-                    polls::poll_row(conversation, open_seconds, now),
-                ));
-            }
-
-            if parsed.kind == AppKind::Attachment {
-                let (state, descriptor) = files::incoming_state_row(parsed.body, limit);
-                planned.push(Planned::Put(
-                    FILE_STATE,
-                    row,
-                    Some(conversation.0),
-                    Zeroizing::new(state),
-                ));
-                if let Some(descriptor) = descriptor {
-                    wanted.push(DownloadJob {
-                        message,
-                        descriptor: Box::new(descriptor),
-                    });
-                }
-            }
-
-            // A record of the user raises no alert.
-            events.push(if from_user {
-                Event::Delivery { message, delivery }
-            } else {
-                Event::Message {
-                    conversation,
-                    message,
-                }
-            });
-
-            // NET-041: this device holds the message now.
-            if !record.synced && sends_delivery.contains(&conversation) {
-                let key = held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
-                planned.push(Planned::Put(
-                    RECEIPT,
-                    open.store.row_id(RECEIPT, &key),
-                    Some(conversation.0),
-                    Zeroizing::new(held_receipt(
-                        conversation,
-                        AppKind::DeliveryReceipt,
-                        &parsed.msg_id,
-                        now_ms / 1_000,
-                    )),
-                ));
-            }
-        }
-
-        // A clear of a conversation keeps the messages that this batch
-        // stored after it. A receipt below stores no message, thus its
-        // writes are not in that range.
-        let read_from = planned.len();
-        for (conversation, up_to) in read_up_to {
-            for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
-                let plain = Zeroizing::new(plain);
-
-                // IMP-121: the plaintext names its owner. A receipt of this
-                // contact moves no record of another conversation. Such a
-                // row is a fault of the file that the user learns of one
-                // time (`IDN-039`). It ends no batch. A batch that failed
-                // for it would acknowledge no record, and each receipt of
-                // this contact would come again at each run.
-                if conversation_of(&plain).ok() != Some(conversation) {
-                    if !owner_fault {
-                        owner_fault = true;
-                        events.push(Event::IntegrityFault);
-                    }
-                    continue;
-                }
-
-                // A message that no relay took is not one that the peer saw.
-                let Some(info) = target_info(&plain, &mut target_fault, &mut events)? else {
-                    continue;
-                };
-                let is_sent = matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
-                if !info.outgoing || !is_sent || info.stored_at_ms > up_to {
-                    continue;
-                }
-
-                // The receipt changes the state of the newest value of the
-                // row in this batch, thus it puts back no earlier text.
-                let mut plain = match planned_row(&planned, TableId::MESSAGE, row) {
-                    Some(Some(value)) => value,
-                    Some(None) => continue,
-                    None => plain,
-                };
-                let Some(newest) = target_info(&plain, &mut target_fault, &mut events)? else {
-                    continue;
-                };
-                if !newest.delivery.is_below(Delivery::Read) {
-                    continue;
-                }
-
-                write_delivery(&mut plain, Delivery::Read)?;
-                planned.push(Planned::Put(
-                    TableId::MESSAGE,
-                    row,
-                    Some(conversation.0),
-                    plain,
-                ));
-                planned.push(Planned::Delete(OUTBOX, row));
-                delivered.push((row, Delivery::Read));
-                events.push(Event::Delivery {
-                    message: MsgRef(row),
-                    delivery: Delivery::Read,
-                });
-            }
-        }
-
-        // DEV-268, DEV-293: each record of a contact goes to each device of
-        // the set, and its copy waits in the same commit as the record. Each
-        // copy holds its place: the time of this commit, above each copy
-        // that an earlier commit left, and its index in the batch.
-        let mut order_ms = now_ms;
-        if !to_publish.is_empty() {
-            for (_, held) in open.store.list(PUBLISH_PENDING, None)? {
-                let held = Zeroizing::new(held);
-                let at = pending_copy(&held)
-                    .and_then(|(order, _, _)| <[u8; 8]>::try_from(order.get(..8)?).ok())
-                    .map_or(0, u64::from_be_bytes);
-                order_ms = order_ms.max(at.saturating_add(1));
-            }
-        }
-
-        let pending_copies: Vec<(RowId, Zeroizing<Vec<u8>>)> = to_publish
-            .iter()
-            .enumerate()
-            .map(|(index, (conversation, app))| {
-                let index = u32::try_from(index).unwrap_or(u32::MAX);
-                let order = [order_ms.to_be_bytes().as_slice(), &index.to_be_bytes()].concat();
-                (
-                    open.store.row_id(PUBLISH_PENDING, &order),
-                    Zeroizing::new([order.as_slice(), &conversation.0, app].concat()),
-                )
-            })
-            .collect();
-        let mut batch = open.store.begin();
-        for write in &planned {
-            match write {
-                Planned::Put(table, row, owner, plain) => {
-                    batch.put(*table, *row, *owner, plain, rng)?;
-                }
-                Planned::Delete(table, row) => batch.delete(*table, *row),
-            }
-        }
-        for (table, row) in replayed {
-            batch.delete(*table, *row);
-        }
-
-        // IMP-154: an edit keeps no earlier text in the log of the store.
-        if events
-            .iter()
-            .any(|event| matches!(event, Event::Edited { .. }))
-        {
-            batch.erase_earlier();
-        }
-        for (row, value) in &pending_copies {
-            batch.put(PUBLISH_PENDING, *row, None, value, rng)?;
-        }
-
-        batch.commit()?;
-        self.events.extend(events);
+        let context = BatchContext {
+            owns,
+            device_peers,
+            sends_delivery,
+            blocked,
+            limit,
+            now_ms,
+        };
+
+        Ok((context, timers))
+    }
+
+    /// Runs each step that follows the commit of a batch, and gives the
+    /// first fault of a step.
+    fn after_batch<R: CryptoRng + ?Sized>(
+        &mut self,
+        plan: BatchPlan<'_>,
+        read_from: usize,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Option<Error> {
+        let BatchPlan {
+            planned,
+            sync_bodies,
+            digests,
+            handoffs,
+            wanted,
+            control,
+            key_requests,
+            votes,
+            key_changes,
+            shares,
+            intros,
+            supplies,
+            delivered,
+            clears,
+            erased,
+            ..
+        } = plan;
 
         // IMP-132: the batch is in the store, and the relay gives no record
         // of it again. Thus each step below runs to its end. A record that
@@ -2965,7 +1842,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        Ok(fault)
+        fault
     }
 
     /// Stores the records that a sync channel gave, in the conversations
@@ -5153,6 +4030,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::NotFound);
         }
 
+        // DEV-181: a removed device that owns no channel has no path to a
+        // contact, thus its message would wait with no end. DEV-180: a
+        // device that still owns its channels sends on, because an epoch
+        // with no claim takes nothing from it.
+        if self.removed_from_set()? && !self.owns_channels()? {
+            return Err(Error::Refused);
+        }
+
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         if let Some(file) = draft.file() {
@@ -6143,6 +5028,1574 @@ fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {
         .and_then(|b| b.try_into().ok())
         .ok_or(Error::Integrity)?;
     Ok(ConversationId(bytes))
+}
+
+/// One write of a batch.
+// The batch borrows the store, thus each row identifier and each
+// duplicate check comes first.
+enum Planned {
+    Put(TableId, RowId, Option<RowId>, Zeroizing<Vec<u8>>),
+    Delete(TableId, RowId),
+}
+
+/// The newest write of this batch to a row: the value of a put, or
+/// none for a deletion. The outer none is a row that the batch does
+/// not touch, thus the store holds its value.
+fn planned_row(
+    planned: &[Planned],
+    table: TableId,
+    row: RowId,
+) -> Option<Option<Zeroizing<Vec<u8>>>> {
+    planned.iter().rev().find_map(|write| match write {
+        Planned::Put(at_table, at, _, value) if *at_table == table && *at == row => {
+            Some(Some(value.clone()))
+        }
+        Planned::Delete(at_table, at) if *at_table == table && *at == row => Some(None),
+        _ => None,
+    })
+}
+
+/// What the client reads before the plan of a batch borrows the store.
+struct BatchContext {
+    /// Whether this device owns the channels.
+    owns: bool,
+    device_peers: Vec<ConversationId>,
+    /// The conversations whose records get a delivery receipt.
+    sends_delivery: Vec<ConversationId>,
+    blocked: Vec<ConversationId>,
+    // IMP-167, IMP-168: a file above this size waits for a tap.
+    limit: u64,
+    now_ms: u64,
+}
+
+/// What the plan of one batch holds: the writes of the commit, the events,
+/// and the records that a step after the commit takes.
+#[derive(Default)]
+struct BatchPlan<'a> {
+    planned: Vec<Planned>,
+
+    // The timer of each conversation, which a timer record of this
+    // batch moves for each record after it (`DEV-203`).
+    timers: BTreeMap<ConversationId, u32>,
+
+    sync_bodies: Vec<(ConversationId, Vec<u8>)>,
+    digests: Vec<DigestBody>,
+    to_publish: Vec<(ConversationId, &'a [u8])>,
+    handoffs: Vec<Outgoing>,
+    wanted: Vec<DownloadJob>,
+    control: Vec<(ConversationId, &'a [u8])>,
+
+    // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
+    key_requests: Vec<(ConversationId, &'a [u8])>,
+    votes: Vec<(ConversationId, &'a [u8], u16)>,
+    key_changes: Vec<(ConversationId, &'a [u8])>,
+    shares: Vec<(ConversationId, &'a [u8])>,
+    intros: Vec<(ConversationId, &'a [u8])>,
+    supplies: Vec<(ConversationId, &'a [u8])>,
+
+    events: Vec<Event>,
+    owner_fault: bool,
+    target_fault: bool,
+    delivered: Vec<(RowId, Delivery)>,
+
+    // What this batch plans and the store does not hold yet. The plan
+    // holds the count and the mark of each revised message, each
+    // pending reference, and the reactions that each party adds to each
+    // message.
+    revised: BTreeMap<RowId, (u8, Option<SyncPlace>)>,
+    pended: BTreeMap<RowId, (ConversationId, Zeroizing<Vec<u8>>)>,
+    reacted: BTreeMap<(RowId, u8), usize>,
+
+    // The reactions and the count of the pending references that the
+    // store holds for each conversation. One read serves each record of
+    // the batch. A contact sets the count of the records, and a read
+    // for each one would cost the count times the size of the table.
+    stored_reactions: BTreeMap<ConversationId, StoredReactions>,
+    stored_pending: BTreeMap<ConversationId, usize>,
+
+    // The forward policy of each conversation that this batch moves.
+    forwards: BTreeMap<ConversationId, ForwardSetting>,
+
+    // DEV-335: each deletion of a whole conversation, with its bound and
+    // the count of the writes that this batch planned before it.
+    clears: Vec<(ConversationId, &'a [u8], [u8; 16], usize)>,
+
+    // The messages that a deletion of this batch overwrote, whose copies
+    // for the other devices of the set go after the commit (`DEV-099`).
+    erased: Vec<MsgRef>,
+
+    // The newest message that a read receipt of this batch named, for
+    // each conversation (`WIR-514`).
+    read_up_to: BTreeMap<ConversationId, u64>,
+}
+
+/// One record of a batch that passed the first checks, with the facts that
+/// each part of its plan reads.
+struct Item<'a> {
+    record: &'a Record,
+    parsed: AppMessage<'a>,
+    /// The place of a record that a sync channel gave.
+    place: Option<SyncPlace>,
+    /// Whether a copy of the record goes to the other devices of the set.
+    publishes: bool,
+    /// Whether this device sends the record for a peer that handed it over.
+    handoff: bool,
+    direction: u8,
+}
+
+/// The names of one message in the store.
+struct Named {
+    reference: [u8; 16],
+    natural: Vec<u8>,
+    row: RowId,
+}
+
+/// Gives the names of the message that `msg_id` names in a conversation.
+fn named<B: Backend>(open: &Open<B>, conversation: ConversationId, msg_id: &[u8; 16]) -> Named {
+    let reference = msg_ref(&open.device_set_key, msg_id);
+    let natural = [conversation.0.as_slice(), &reference].concat();
+    let row = open.store.row_id(TableId::MESSAGE, &natural);
+
+    Named {
+        reference,
+        natural,
+        row,
+    }
+}
+
+/// What waited for a message before its arrival (`DEV-093`).
+enum Waited {
+    /// A deletion: the message makes no row.
+    Deletion,
+    /// An edit, with the text that the message takes.
+    Edit(Zeroizing<Vec<u8>>),
+    Nothing,
+}
+
+/// Plans the write of each change of the node state.
+fn plan_changes<B: Backend>(open: &Open<B>, planned: &mut Vec<Planned>, changes: &[&StateChange]) {
+    for change in changes {
+        planned.push(match change {
+            StateChange::Contact { contact, state } => Planned::Put(
+                TableId::CONTACT,
+                open.store.row_id(TableId::CONTACT, &contact.0),
+                None,
+                Zeroizing::new([contact.0.as_slice(), state].concat()),
+            ),
+            StateChange::Invitation { queue, state } => Planned::Put(
+                INVITATION,
+                open.store.row_id(INVITATION, queue),
+                None,
+                Zeroizing::new([queue.as_slice(), state].concat()),
+            ),
+            StateChange::InvitationEnded { queue } => {
+                Planned::Delete(INVITATION, open.store.row_id(INVITATION, queue))
+            }
+            StateChange::NotifyQueue { queue, state } => Planned::Put(
+                NOTIFY_STATE,
+                open.store.row_id(NOTIFY_STATE, queue),
+                None,
+                Zeroizing::new([queue.as_slice(), state].concat()),
+            ),
+            StateChange::NotifyQueueEnded { queue } => {
+                Planned::Delete(NOTIFY_STATE, open.store.row_id(NOTIFY_STATE, queue))
+            }
+            StateChange::RendezvousQueue { queue, state } => Planned::Put(
+                discovery::RENDEZVOUS_STATE,
+                open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
+                None,
+                Zeroizing::new([queue.as_slice(), state].concat()),
+            ),
+            StateChange::RendezvousQueueEnded { queue } => Planned::Delete(
+                discovery::RENDEZVOUS_STATE,
+                open.store.row_id(discovery::RENDEZVOUS_STATE, queue),
+            ),
+        });
+    }
+}
+
+/// Plans the writes of one record of a batch, or keeps the record for a
+/// step after the commit. A record that changes nothing is one silent drop.
+fn plan_record<'a, B: Backend>(
+    open: &mut Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    record: &'a Record,
+    place: Option<SyncPlace>,
+) -> Result<(), Error> {
+    let app = &record.app;
+    let conversation = record.conversation;
+    let from_user = record.from_user;
+
+    // A record whose app does not parse is one silent drop, as
+    // GRP-251 has it for a group. A fault here would end the commit
+    // of the batch, and no ACK would leave. The relay would give
+    // the record again at each connection, and one record of a
+    // contact would stop the client for good.
+    let Ok(parsed) = AppMessage::parse(app, Channel::Pairwise) else {
+        return Ok(());
+    };
+
+    // DEV-052: a sync channel carries kind 0x20 alone, and no view
+    // shows its records.
+    if context.device_peers.contains(&conversation) {
+        if parsed.kind == AppKind::DeviceSet {
+            plan.sync_bodies.push((conversation, parsed.body.to_vec()));
+        }
+        return Ok(());
+    }
+
+    // DEV-050: kind 0x20 on a pairwise channel changes nothing.
+    if parsed.kind == AppKind::DeviceSet {
+        return Ok(());
+    }
+
+    // DIS-033, REL-008: the digest of a contact is no message, and
+    // it compares after the batch. A body that does not parse goes.
+    if parsed.kind == AppKind::TransparencyDigest {
+        if !from_user && !context.blocked.contains(&conversation) {
+            if let Ok(body) = DigestBody::parse(parsed.body) {
+                plan.digests.push(body);
+            }
+        }
+        return Ok(());
+    }
+
+    // WIR-176: a pairwise record names no member, and a poll that
+    // does not parse is no poll (WIR-180 to WIR-182).
+    // DEV-174: a rich record of a pairwise channel goes around a
+    // text. Thus one around another kind, or around bytes that are
+    // no UTF-8, is no message.
+    let is_invalid = match parsed.kind {
+        AppKind::Rich => RichRecord::parse(parsed.body, Channel::Pairwise).map_or(true, |rich| {
+            rich.inner_kind != AppKind::Text || core::str::from_utf8(rich.inner_body).is_err()
+        }),
+        AppKind::Poll => Poll::parse(parsed.body).is_err(),
+        _ => false,
+    };
+    if is_invalid {
+        return Ok(());
+    }
+
+    // ABU-027 to ABU-030: the record of a blocked contact goes,
+    // after its acknowledgment, with no view and no alert. A
+    // delivery receipt keeps the rate that held before the block.
+    // It names a record that the store would have kept as a
+    // message, and no other one. Thus a typing record or an edit of
+    // a blocked contact gets no receipt that it did not get before.
+    if !from_user && context.blocked.contains(&conversation) {
+        plan_blocked(open, context, plan, record, &parsed);
+        return Ok(());
+    }
+
+    // DEV-247: the owner of the channels forwards no revision that it
+    // rejected, thus the copy of an edit waits for its checks below.
+    let publishes = !record.synced && context.owns;
+    if publishes && parsed.kind != AppKind::Edit {
+        plan.to_publish.push((conversation, app.as_slice()));
+    }
+
+    // The owner of the channels sends each record that a peer
+    // handed to it. The record of an edit, a deletion, or a reaction
+    // waits in a request row, as one of this device does.
+    let handoff = record.synced && from_user && context.owns;
+
+    // A row of the store reads back with its body, thus a handed
+    // record whose body does not parse is one drop and no row.
+    let is_unreadable = match parsed.kind {
+        AppKind::Delete => DeleteBody::parse(parsed.body).is_err(),
+        AppKind::Edit => EditBody::parse(parsed.body).is_err(),
+        _ => false,
+    };
+    if handoff && is_unreadable {
+        return Ok(());
+    }
+
+    let is_change = matches!(
+        parsed.kind,
+        AppKind::Reaction | AppKind::Edit | AppKind::Delete | AppKind::PollVote
+    );
+    if handoff
+        && is_change
+        && !plan_handoff_request(open, plan, record, &parsed.msg_id, context.now_ms)?
+    {
+        return Ok(());
+    }
+    let direction = if from_user { OUTGOING } else { INCOMING };
+    let item = Item {
+        record,
+        parsed,
+        place,
+        publishes,
+        handoff,
+        direction,
+    };
+
+    if let Some(reported) = Delivery::of_receipt(item.parsed.kind) {
+        return plan_receipt(open, plan, conversation, reported, item.parsed.body);
+    }
+    if keep_for_later(plan, &item) {
+        return Ok(());
+    }
+
+    match item.parsed.kind {
+        AppKind::Reaction => plan_reaction(open, plan, &item),
+        AppKind::Edit => plan_edit(open, context, plan, &item),
+        AppKind::Delete => plan_delete(open, context, plan, &item),
+        _ => plan_message(open, context, plan, &item),
+    }
+}
+
+/// Plans the delivery receipt of a record that this device holds.
+fn plan_delivery_receipt<B: Backend>(
+    open: &Open<B>,
+    planned: &mut Vec<Planned>,
+    conversation: ConversationId,
+    msg_id: &[u8; 16],
+    now_ms: u64,
+) {
+    let key = held_receipt_key(conversation, AppKind::DeliveryReceipt, msg_id);
+    planned.push(Planned::Put(
+        RECEIPT,
+        open.store.row_id(RECEIPT, &key),
+        Some(conversation.0),
+        Zeroizing::new(held_receipt(
+            conversation,
+            AppKind::DeliveryReceipt,
+            msg_id,
+            now_ms / 1_000,
+        )),
+    ));
+}
+
+/// Takes the record of a blocked contact: a key request gets its answer,
+/// and a record that the store would have kept gets its delivery receipt.
+fn plan_blocked<'a, B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    record: &Record,
+    parsed: &AppMessage<'a>,
+) {
+    let conversation = record.conversation;
+
+    // WIR-339: a blocked contact that asks for a record of this
+    // device gets the answer that it got before the block.
+    if parsed.kind == AppKind::KeyRequest && !record.synced {
+        plan.key_requests.push((conversation, parsed.body));
+        return;
+    }
+
+    let is_kept = match parsed.kind {
+        AppKind::Text | AppKind::Rich | AppKind::Attachment | AppKind::Poll => true,
+        AppKind::ConversationTimer => timers::timer_body(parsed.body).is_some(),
+        AppKind::ForwardPolicy => forward::policy_body(parsed.body).is_some(),
+        _ => false,
+    };
+    if !record.synced && context.sends_delivery.contains(&conversation) && is_kept {
+        plan_delivery_receipt(
+            open,
+            &mut plan.planned,
+            conversation,
+            &parsed.msg_id,
+            context.now_ms,
+        );
+    }
+}
+
+/// Plans the request row of an edit, a deletion, a reaction, or a vote that
+/// a peer handed to this device. The result is false for a record that the
+/// batch or the store holds already.
+fn plan_handoff_request<B: Backend>(
+    open: &mut Open<B>,
+    plan: &mut BatchPlan<'_>,
+    record: &Record,
+    msg_id: &[u8; 16],
+    now_ms: u64,
+) -> Result<bool, Error> {
+    let conversation = record.conversation;
+    let row = named(open, conversation, msg_id).row;
+    let queued = plan.handoffs.iter().any(|held| held.message.0 == row);
+    if queued || open.store.get(TableId::MESSAGE, &row)?.is_some() {
+        return Ok(false);
+    }
+
+    plan.planned.push(Planned::Put(
+        TableId::MESSAGE,
+        row,
+        Some(conversation.0),
+        stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &record.app,
+        ),
+    ));
+    plan.planned.push(Planned::Put(
+        OUTBOX,
+        row,
+        None,
+        Zeroizing::new(outbox_row()),
+    ));
+    plan.handoffs.push(Outgoing {
+        message: MsgRef(row),
+        conversation,
+        app: record.app.clone(),
+    });
+
+    Ok(true)
+}
+
+/// Plans the delivery state of each message that a receipt names.
+fn plan_receipt<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    conversation: ConversationId,
+    reported: Delivery,
+    body: &[u8],
+) -> Result<(), Error> {
+    // A receipt is no message. A body that does not parse
+    // changes nothing, and it ends no batch.
+    let targets = ReceiptBody::parse(body).map_or(Vec::new(), |body| body.targets);
+    let mut named_rows = Vec::new();
+    for target in targets {
+        let row = named(open, conversation, &target).row;
+        let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
+            continue;
+        };
+        let plain = Zeroizing::new(plain);
+
+        // WIR-293: a receipt names a message of this device to
+        // this peer.
+        let Some(info) = target_info(&plain, &mut plan.target_fault, &mut plan.events)? else {
+            continue;
+        };
+        if info.outgoing {
+            named_rows.push((row, plain, info));
+        }
+    }
+
+    if reported == Delivery::Read && !named_rows.is_empty() {
+        // WIR-514: the peer saw each message up to the newest
+        // one that the receipt names. The scan for them runs
+        // after the loop, one time for each conversation. A
+        // contact sends many receipts, and each one would read
+        // each message of the conversation again.
+        let mut up_to = 0;
+        for (_, _, info) in &named_rows {
+            up_to = up_to.max(info.stored_at_ms);
+        }
+        let newest = plan.read_up_to.entry(conversation).or_insert(0);
+        *newest = (*newest).max(up_to);
+    }
+
+    for (row, mut plain, info) in named_rows {
+        // A state goes up only.
+        if !info.delivery.is_below(reported) {
+            continue;
+        }
+        write_delivery(&mut plain, reported)?;
+        plan.planned.push(Planned::Put(
+            TableId::MESSAGE,
+            row,
+            Some(conversation.0),
+            plain,
+        ));
+        plan.planned.push(Planned::Delete(OUTBOX, row));
+        plan.delivered.push((row, reported));
+        plan.events.push(Event::Delivery {
+            message: MsgRef(row),
+            delivery: reported,
+        });
+    }
+
+    Ok(())
+}
+
+/// Keeps a record that is no message and that a step after the commit
+/// takes, or raises the event of a typing record. The result says whether
+/// the record was of such a kind.
+fn keep_for_later<'a>(plan: &mut BatchPlan<'a>, item: &Item<'a>) -> bool {
+    let record = item.record;
+    let parsed = &item.parsed;
+    let conversation = record.conversation;
+    let from_user = record.from_user;
+
+    if parsed.kind == AppKind::GroupControl {
+        // The join flow of Part 11 §11.9.1 runs after this loop,
+        // because it reads and writes groups of its own. The device
+        // that owns the channels runs it.
+        if !record.synced {
+            plan.control.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    if parsed.kind == AppKind::KeyRequest {
+        if !record.synced {
+            plan.key_requests.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    // WIR-459: the supply of a request of scope 0x01 comes on the
+    // channel of the request, and it is no message.
+    if parsed.kind == AppKind::KeySupply {
+        if !from_user && !record.synced {
+            plan.supplies.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    // WIR-287: a typing record of the contact moves a state of the
+    // view, and no store holds it. A group takes none (GRP-300).
+    if parsed.kind == AppKind::Typing {
+        if !from_user && !record.synced {
+            if let Ok(state) = TypingState::parse(parsed.body) {
+                plan.events.push(Event::Typing {
+                    conversation,
+                    is_typing: state == TypingState::Started,
+                });
+            }
+        }
+        return true;
+    }
+
+    // IDN-059: a key-change notice of the contact comes on its
+    // receiving chain, and it waits for the user. It is no message.
+    if parsed.kind == AppKind::KeyChange {
+        if !from_user {
+            plan.key_changes.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    // WIR-196, WIR-358: a contact share is no message, and a request
+    // or an offer waits for the user.
+    if parsed.kind == AppKind::ContactShare {
+        if !from_user && !record.synced {
+            plan.intros.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    // IDN-189: a share of a contact is no message, and this device
+    // holds it for the day that contact needs it.
+    if parsed.kind == AppKind::RecoveryShare {
+        if !from_user {
+            plan.shares.push((conversation, parsed.body));
+        }
+        return true;
+    }
+
+    if parsed.kind == AppKind::PollVote {
+        // A vote is no message: it moves the count of its poll
+        // after the batch.
+        let voter = if from_user {
+            polls::VOTER_SELF
+        } else {
+            polls::VOTER_PEER
+        };
+        plan.votes.push((conversation, parsed.body, voter));
+        return true;
+    }
+
+    false
+}
+
+/// Reads the reactions of a conversation into the plan, one time for the
+/// batch.
+fn load_reactions<B: Backend>(
+    open: &Open<B>,
+    stored_reactions: &mut BTreeMap<ConversationId, StoredReactions>,
+    conversation: ConversationId,
+) -> Result<(), Error> {
+    if let Entry::Vacant(vacant) = stored_reactions.entry(conversation) {
+        let listed = open.store.list(REACTION, Some(&conversation.0))?;
+        vacant.insert(
+            listed
+                .into_iter()
+                .map(|(held, other)| (held, Zeroizing::new(other)))
+                .collect(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Counts the pending references of a conversation: those of the store,
+/// which one read gives for the batch, and those of this batch.
+fn pending_count<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    conversation: ConversationId,
+) -> Result<usize, Error> {
+    let stored = match plan.stored_pending.get(&conversation) {
+        Some(count) => *count,
+        None => {
+            let count = open.store.count(PENDING, Some(&conversation.0))?;
+            plan.stored_pending.insert(conversation, count);
+            count
+        }
+    };
+
+    Ok(stored.saturating_add(
+        plan.pended
+            .values()
+            .filter(|(held, _)| *held == conversation)
+            .count(),
+    ))
+}
+
+/// Plans the row of a reaction that a record adds or removes.
+fn plan_reaction<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+) -> Result<(), Error> {
+    let conversation = item.record.conversation;
+    let direction = item.direction;
+
+    // A reaction is no message. One that does not parse, one
+    // with a text in the place of an emoji, and one to a message
+    // that this device does not hold change nothing (`WIR-282`).
+    let Ok(reaction) = ReactionBody::parse(item.parsed.body) else {
+        return Ok(());
+    };
+    if !is_emoji(reaction.emoji) {
+        return Ok(());
+    }
+
+    let Named {
+        reference,
+        row: target,
+        ..
+    } = named(open, conversation, &reaction.target);
+
+    // A target that came earlier in this batch is in the plan.
+    let held = match planned_row(&plan.planned, TableId::MESSAGE, target) {
+        Some(held) => held,
+        None => open
+            .store
+            .get(TableId::MESSAGE, &target)?
+            .map(Zeroizing::new),
+    };
+    let Some(held) = held else {
+        return Ok(());
+    };
+    let Some(info) = target_info(&held, &mut plan.target_fault, &mut plan.events)? else {
+        return Ok(());
+    };
+    if info.deleted || is_request(&held)? {
+        return Ok(());
+    }
+
+    let plain = reaction_row(conversation, &reference, direction, reaction.emoji);
+    let row = open.store.row_id(REACTION, &plain);
+    let exists = match planned_row(&plan.planned, REACTION, row) {
+        Some(held) => held.is_some(),
+        None => open.store.get(REACTION, &row)?.is_some(),
+    };
+    match reaction.action {
+        ReactionAction::Add if !exists => {
+            load_reactions(open, &mut plan.stored_reactions, conversation)?;
+
+            let prefix = [reference.as_slice(), &[direction]].concat();
+            let of_contact = plan
+                .stored_reactions
+                .get(&conversation)
+                .map_or(0, |listed| {
+                    listed
+                        .iter()
+                        .filter(|(_, other)| {
+                            other.get(16..REACTION_PREFIX) == Some(prefix.as_slice())
+                        })
+                        .count()
+                });
+
+            // The reactions that this batch adds count too.
+            let added = plan.reacted.entry((target, direction)).or_insert(0usize);
+            if of_contact.saturating_add(*added) >= REACTIONS_MAX {
+                return Ok(());
+            }
+            *added = added.saturating_add(1);
+            plan.planned.push(Planned::Put(
+                REACTION,
+                row,
+                Some(conversation.0),
+                Zeroizing::new(plain),
+            ));
+        }
+        // WIR-281: the same sender, emoji, and target.
+        ReactionAction::Remove if exists => plan.planned.push(Planned::Delete(REACTION, row)),
+        _ => return Ok(()),
+    }
+
+    plan.events.push(Event::Reacted {
+        conversation,
+        message: MsgRef(target),
+    });
+
+    Ok(())
+}
+
+/// Plans an edit: it revises a target that the batch or the store holds,
+/// or it holds the edit for a target that did not arrive.
+fn plan_edit<'a, B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    item: &Item<'a>,
+) -> Result<(), Error> {
+    // An edit is no message. A body that does not parse
+    // changes nothing.
+    let Ok(edit) = EditBody::parse(item.parsed.body) else {
+        return Ok(());
+    };
+
+    let target = named(open, item.record.conversation, &edit.target);
+    let row = target.row;
+
+    // A target that came earlier in this batch is in the plan.
+    let held = match planned_row(&plan.planned, TableId::MESSAGE, row) {
+        Some(held) => held,
+        None => open.store.get(TableId::MESSAGE, &row)?.map(Zeroizing::new),
+    };
+    match held {
+        Some(plain) => revise_message(open, context, plan, item, row, &plain, edit.new_body),
+        // DEV-093: the target did not arrive yet. A deletion
+        // that waits for the same target stays.
+        None => hold_edit(open, context, plan, item, &target, edit.new_body),
+    }
+}
+
+/// Plans the new text of a message that an edit names, after the checks of
+/// the edit.
+fn revise_message<'a, B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    item: &Item<'a>,
+    row: RowId,
+    plain: &[u8],
+    new_body: &str,
+) -> Result<(), Error> {
+    let record = item.record;
+    let conversation = record.conversation;
+    let place = item.place;
+
+    let Some(info) = target_info(plain, &mut plan.target_fault, &mut plan.events)? else {
+        return Ok(());
+    };
+
+    // An earlier edit of this batch moved the count and
+    // the mark, and the store does not hold them yet.
+    let held = match plan.revised.get(&row) {
+        Some(held) => *held,
+        None => revision_of(open.store.get(REVISION, &row)?.as_deref())?,
+    };
+    let (count, mark) = held;
+
+    // WIR-082: the sender of the target alone. DEV-087:
+    // inside the window from the store time of this
+    // device. DEV-088: below the limit. DEV-246: a copy
+    // from a sync channel passed the checks of the
+    // device that took the revision. This device
+    // measures no window and no limit for it.
+    let in_window = context.now_ms.saturating_sub(info.clock_at_ms) < EDIT_WINDOW_MS;
+    if info.outgoing != record.from_user
+        || info.deleted
+        || (!record.synced && (!in_window || count >= EDIT_MAX))
+    {
+        return Ok(());
+    }
+
+    // DEV-034, DEV-035: a copy at or below the newest
+    // revision that its source gave is an older text.
+    // It never takes the place of a newer one. The
+    // counters of two sources do not compare.
+    let is_older = matches!(
+        (place, mark),
+        (Some((source, counter)), Some((held, newest)))
+            if source == held && counter <= newest
+    );
+    if is_older {
+        return Ok(());
+    }
+
+    // WIR-260: a target with no text takes no edit. The
+    // plan holds the text of an earlier edit of this
+    // batch.
+    let Ok(changed) = row_with_text(plain, new_body.as_bytes()) else {
+        return Ok(());
+    };
+
+    if item.publishes {
+        plan.to_publish.push((conversation, record.app.as_slice()));
+    }
+
+    // The earlier text goes: the row gets a new key.
+    plan.planned.push(Planned::Put(
+        TableId::MESSAGE,
+        row,
+        Some(conversation.0),
+        changed,
+    ));
+    let next = (count.saturating_add(1), place.or(mark));
+    plan.revised.insert(row, next);
+    plan.planned
+        .push(Planned::Put(REVISION, row, None, revision_row(next)));
+    plan.events.push(Event::Edited {
+        conversation,
+        message: MsgRef(row),
+    });
+
+    Ok(())
+}
+
+/// Holds an edit whose target did not arrive yet (`DEV-093`).
+fn hold_edit<'a, B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    item: &Item<'a>,
+    target: &Named,
+    new_body: &str,
+) -> Result<(), Error> {
+    let record = item.record;
+    let conversation = record.conversation;
+
+    let pending = open
+        .store
+        .row_id(PENDING, &pending_key(&target.natural, record.from_user));
+    let is_deleted = match plan.pended.get(&pending) {
+        Some((_, entry)) => entry.len() == PENDING_ROW_LEN,
+        None => open
+            .store
+            .get(PENDING, &pending)?
+            .is_some_and(|entry| entry.len() == PENDING_ROW_LEN),
+    };
+
+    // DEV-095: the entries of this batch count too.
+    let held = pending_count(open, plan, conversation)?;
+    if is_deleted || held >= REF_ORPHAN_MAX {
+        return Ok(());
+    }
+
+    if item.publishes {
+        plan.to_publish.push((conversation, record.app.as_slice()));
+    }
+
+    let entry = Zeroizing::new(
+        [
+            conversation.0.as_slice(),
+            &target.reference,
+            &(context.now_ms / 1_000).to_be_bytes(),
+            new_body.as_bytes(),
+        ]
+        .concat(),
+    );
+    plan.pended.insert(pending, (conversation, entry.clone()));
+    plan.planned
+        .push(Planned::Put(PENDING, pending, Some(conversation.0), entry));
+
+    Ok(())
+}
+
+/// Plans a deletion: it keeps the order to clear a conversation, it erases
+/// each target that the batch or the store holds, and it holds the deletion
+/// for a target that did not arrive.
+fn plan_delete<'a, B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    item: &Item<'a>,
+) -> Result<(), Error> {
+    let record = item.record;
+    let conversation = record.conversation;
+    let from_user = record.from_user;
+
+    // A deletion is no message. WIR-084: a contact deletes for
+    // the other party, and a record of another scope, or one
+    // that does not parse, changes nothing.
+    let body = DeleteBody::parse(item.parsed.body).ok();
+
+    // DEV-335: the contact deletes the whole conversation after
+    // this batch. A copy of a request of the user is no order:
+    // the deletions of scope 0x01 of DEV-333 reach this device.
+    if let Some(body) = body
+        .as_ref()
+        .filter(|body| body.scope == DeleteScope::Conversation)
+    {
+        if let (false, Some(bound)) = (from_user, body.targets.first()) {
+            plan.clears.push((
+                conversation,
+                record.app.as_slice(),
+                *bound,
+                plan.planned.len(),
+            ));
+        }
+        return Ok(());
+    }
+    let targets = match body {
+        Some(body) if body.scope == DeleteScope::OtherParty => body.targets,
+        _ => Vec::new(),
+    };
+    for msg_id in targets {
+        let target = named(open, conversation, &msg_id);
+
+        // A target that came earlier in this batch is in the
+        // plan, and the store does not hold it yet.
+        let held = match planned_row(&plan.planned, TableId::MESSAGE, target.row) {
+            Some(held) => held,
+            None => open
+                .store
+                .get(TableId::MESSAGE, &target.row)?
+                .map(Zeroizing::new),
+        };
+        match held {
+            Some(plain) => erase_message(open, plan, item, &target, msg_id, &plain)?,
+            // DEV-093: the target did not arrive yet.
+            None => hold_deletion(open, context, plan, item, &target)?,
+        }
+    }
+
+    Ok(())
+}
+
+/// Plans the placeholder of a message that its sender deleted, and takes
+/// each row and each step of this batch that the message had.
+fn erase_message<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+    target: &Named,
+    msg_id: [u8; 16],
+    plain: &[u8],
+) -> Result<(), Error> {
+    let conversation = item.record.conversation;
+    let reference = target.reference;
+    let row = target.row;
+
+    // DEV-081, DEV-085: the contact names a message
+    // that the contact sent, and no other one.
+    let Some(info) = target_info(plain, &mut plan.target_fault, &mut plan.events)? else {
+        return Ok(());
+    };
+    if info.outgoing != item.record.from_user || info.deleted {
+        return Ok(());
+    }
+
+    plan.planned.push(Planned::Put(
+        TableId::MESSAGE,
+        row,
+        Some(conversation.0),
+        placeholder_of(plain)?,
+    ));
+
+    // A placeholder holds no reaction, no vote, no
+    // poll, and no deadline.
+    let mut gone: Vec<(TableId, RowId)> = Vec::new();
+    load_reactions(open, &mut plan.stored_reactions, conversation)?;
+    for (held, other) in plan
+        .stored_reactions
+        .get(&conversation)
+        .into_iter()
+        .flatten()
+    {
+        if other.get(16..32) == Some(reference.as_slice()) {
+            gone.push((REACTION, *held));
+        }
+    }
+    for write in &plan.planned {
+        if let Planned::Put(table, held, _, other) = write {
+            if *table == REACTION && other.get(16..32) == Some(reference.as_slice()) {
+                gone.push((REACTION, *held));
+            }
+        }
+    }
+
+    for (held, other) in open.store.list(polls::VOTES, Some(&conversation.0))? {
+        if other.get(16..32) == Some(row.as_slice()) {
+            gone.push((polls::VOTES, held));
+        }
+    }
+
+    // The contact uploaded the file, thus this device
+    // holds no credential that erases a chunk. A
+    // message of the user from another device leaves
+    // no relay now.
+    for table in [
+        REVISION,
+        FILE_STATE,
+        FILE_DATA,
+        polls::POLLS,
+        timers::DEADLINES,
+        OUTBOX,
+    ] {
+        gone.push((table, row));
+    }
+    plan.planned.extend(
+        gone.into_iter()
+            .map(|(table, held)| Planned::Delete(table, held)),
+    );
+    let message = MsgRef(row);
+    plan.wanted.retain(|job| job.message != message);
+    plan.handoffs.retain(|held| held.message != message);
+
+    // DEV-099: no copy of the content goes to the
+    // other devices of the set.
+    plan.to_publish.retain(|(held, copy)| {
+        *held != conversation
+            || AppMessage::parse(copy, Channel::Pairwise).map_or(true, |copy| copy.msg_id != msg_id)
+    });
+
+    // A message of this batch raises no alert now.
+    plan.events
+        .retain(|event| !matches!(event, Event::Message { message: m, .. } if *m == message));
+    plan.events.push(Event::Deleted {
+        conversation,
+        message,
+    });
+    plan.erased.push(message);
+
+    Ok(())
+}
+
+/// Holds a deletion whose target did not arrive yet (`DEV-093`).
+fn hold_deletion<B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+    target: &Named,
+) -> Result<(), Error> {
+    let conversation = item.record.conversation;
+
+    let held = pending_count(open, plan, conversation)?;
+    if held >= REF_ORPHAN_MAX {
+        return Ok(());
+    }
+
+    let pending = open.store.row_id(
+        PENDING,
+        &pending_key(&target.natural, item.record.from_user),
+    );
+    let entry = Zeroizing::new(
+        [
+            conversation.0.as_slice(),
+            &target.reference,
+            &(context.now_ms / 1_000).to_be_bytes(),
+        ]
+        .concat(),
+    );
+    plan.pended.insert(pending, (conversation, entry.clone()));
+    plan.planned
+        .push(Planned::Put(PENDING, pending, Some(conversation.0), entry));
+
+    Ok(())
+}
+
+/// Plans the rows of a record that the store keeps as a message.
+fn plan_message<'a, B: Backend>(
+    open: &mut Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'a>,
+    item: &Item<'a>,
+) -> Result<(), Error> {
+    let record = item.record;
+    let parsed = &item.parsed;
+    let conversation = record.conversation;
+
+    let target = named(open, conversation, &parsed.msg_id);
+    let row = target.row;
+    let message = MsgRef(row);
+
+    let edited_text = match waited_change(open, plan, &target, record.from_user, context.now_ms)? {
+        Waited::Deletion => return Ok(()),
+        Waited::Edit(text) => Some(text),
+        Waited::Nothing => None,
+    };
+
+    let in_batch = plan.events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Message { message: m, .. } | Event::Delivery { message: m, .. }
+                if *m == message
+        )
+    });
+    if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
+        return Ok(());
+    }
+
+    // DEV-205: either party sets the timer, and the record stays in
+    // the conversation as the mark of the change (`DEV-207`).
+    if parsed.kind == AppKind::ConversationTimer && !plan_timer(open, context, plan, item) {
+        return Ok(());
+    }
+
+    // DEV-321, DEV-323: each party sets the policy of its own
+    // messages, and an older record changes nothing and is no row.
+    if parsed.kind == AppKind::ForwardPolicy && !plan_forward_policy(open, plan, item)? {
+        return Ok(());
+    }
+
+    // DEV-208, DEV-244: the period runs from the receive time here,
+    // and a sync copy brings the rest of its own.
+    let now = context.now_ms / 1_000;
+    let deadline = if !timers::is_timed_kind(parsed.kind) {
+        None
+    } else if record.synced {
+        (record.expires_in > 0).then(|| Deadline::from_sync(now, record.expires_in))
+    } else {
+        plan.timers
+            .get(&conversation)
+            .filter(|seconds| **seconds > 0)
+            .map(|seconds| Deadline::received(now, *seconds))
+    };
+    if let Some(deadline) = deadline {
+        plan.planned.push(Planned::Put(
+            timers::DEADLINES,
+            row,
+            Some(conversation.0),
+            timers::deadline_row(conversation, deadline.at),
+        ));
+    }
+
+    if item.handoff {
+        plan_handoff_message(open, context, plan, item, row);
+        return Ok(());
+    }
+
+    plan_kept_message(open, context, plan, item, row, edited_text)
+}
+
+/// Takes the deletion or the edit that waited for a message, and plans the
+/// end of its entry.
+fn waited_change<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    target: &Named,
+    from_user: bool,
+    now_ms: u64,
+) -> Result<Waited, Error> {
+    let natural = &target.natural;
+
+    // A deletion that came first takes the message at its arrival:
+    // the view shows nothing at that position (Part 7 §7.5.6).
+    // DEV-093: the entry of the party that sent the message alone.
+    // Thus an edit or a deletion of the contact takes no record of
+    // the user. An entry of an earlier build names no direction,
+    // and it came from the contact.
+    let mut pending = open.store.row_id(PENDING, &pending_key(natural, from_user));
+    let mut waiting = match plan.pended.remove(&pending) {
+        Some((_, entry)) => Some(entry),
+        None => open.store.get(PENDING, &pending)?.map(Zeroizing::new),
+    };
+    if waiting.is_none() && !from_user {
+        pending = open.store.row_id(PENDING, natural);
+        waiting = open.store.get(PENDING, &pending)?.map(Zeroizing::new);
+    }
+
+    // DEV-093: a deletion of another device of the user came first.
+    // It takes the message, and an edit that waits goes with it.
+    let own = open.store.row_id(PENDING, &own_pending_key(natural));
+    if let Some(entry) = open.store.get(PENDING, &own)?.map(Zeroizing::new) {
+        plan.planned.push(Planned::Delete(PENDING, own));
+        let at = entry
+            .get(32..PENDING_ROW_LEN)
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map_or(0, u64::from_be_bytes);
+        if (now_ms / 1_000).saturating_sub(at) < REF_ORPHAN_TTL {
+            if waiting.is_some() {
+                plan.planned.push(Planned::Delete(PENDING, pending));
+            }
+            return Ok(Waited::Deletion);
+        }
+    }
+
+    let mut waited = Waited::Nothing;
+    if let Some(entry) = waiting {
+        let at: [u8; 8] = entry
+            .get(32..PENDING_ROW_LEN)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(Error::Integrity)?;
+        plan.planned.push(Planned::Delete(PENDING, pending));
+
+        // DEV-095: an entry above its time counts for nothing.
+        if (now_ms / 1_000).saturating_sub(u64::from_be_bytes(at)) < REF_ORPHAN_TTL {
+            let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
+
+            // An entry with no text is a deletion.
+            if text.is_empty() {
+                return Ok(Waited::Deletion);
+            }
+
+            waited = Waited::Edit(Zeroizing::new(text.to_vec()));
+        }
+    }
+
+    Ok(waited)
+}
+
+/// Plans the timer that a timer record sets. The result is false for a
+/// record whose body gives no timer.
+fn plan_timer<B: Backend>(
+    open: &Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+) -> bool {
+    let conversation = item.record.conversation;
+    let Some(seconds) = timers::timer_body(item.parsed.body) else {
+        return false;
+    };
+
+    plan.timers.insert(conversation, seconds);
+    let setting = TimerSetting {
+        seconds,
+        set_at_ms: context.now_ms,
+        by_user: item.record.from_user,
+    };
+    plan.planned.push(Planned::Put(
+        timers::TIMERS,
+        open.store.row_id(timers::TIMERS, &conversation.0),
+        Some(conversation.0),
+        setting.encode(),
+    ));
+
+    true
+}
+
+/// Plans the forward policy that a policy record sets. The result is false
+/// for a record that does not parse and for one that changes nothing.
+fn plan_forward_policy<B: Backend>(
+    open: &Open<B>,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+) -> Result<bool, Error> {
+    let conversation = item.record.conversation;
+    let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(item.parsed.body) else {
+        return Ok(false);
+    };
+
+    let mut setting = match plan.forwards.get(&conversation) {
+        Some(held) => *held,
+        None => forward::setting_in(&open.store, conversation)?,
+    };
+    if !setting.take(&policy, item.record.from_user) {
+        return Ok(false);
+    }
+
+    plan.forwards.insert(conversation, setting);
+    plan.planned.push(Planned::Put(
+        forward::FORWARD_POLICY,
+        open.store.row_id(forward::FORWARD_POLICY, &conversation.0),
+        Some(conversation.0),
+        setting.encode(),
+    ));
+
+    Ok(true)
+}
+
+/// Plans the rows of a message that a peer handed to this device for its
+/// send.
+fn plan_handoff_message<B: Backend>(
+    open: &mut Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+    row: RowId,
+) {
+    let record = item.record;
+    let conversation = record.conversation;
+    let message = MsgRef(row);
+
+    // The record goes as the peer wrote it: its reply target
+    // becomes a reference at the send (`WIR-071`).
+    plan.planned.push(Planned::Put(
+        TableId::MESSAGE,
+        row,
+        Some(conversation.0),
+        stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(context.now_ms),
+            &record.app,
+        ),
+    ));
+    plan.planned.push(Planned::Put(
+        OUTBOX,
+        row,
+        None,
+        Zeroizing::new(outbox_row()),
+    ));
+    if item.parsed.kind == AppKind::Attachment {
+        let (state, _) = files::incoming_state_row(item.parsed.body, 0);
+        plan.planned.push(Planned::Put(
+            FILE_STATE,
+            row,
+            Some(conversation.0),
+            Zeroizing::new(state),
+        ));
+    }
+
+    plan.handoffs.push(Outgoing {
+        message,
+        conversation,
+        app: record.app.clone(),
+    });
+    plan.events.push(Event::Delivery {
+        message,
+        delivery: Delivery::Queued,
+    });
+}
+
+/// Plans the rows of a message that this device keeps, and its event.
+fn plan_kept_message<B: Backend>(
+    open: &mut Open<B>,
+    context: &BatchContext,
+    plan: &mut BatchPlan<'_>,
+    item: &Item<'_>,
+    row: RowId,
+    edited_text: Option<Zeroizing<Vec<u8>>>,
+) -> Result<(), Error> {
+    let record = item.record;
+    let parsed = &item.parsed;
+    let conversation = record.conversation;
+    let from_user = record.from_user;
+    let now_ms = context.now_ms;
+    let now = now_ms / 1_000;
+    let message = MsgRef(row);
+
+    let mut kept = Zeroizing::new(record.app.clone());
+
+    // An edit that came first gives the message its text and the
+    // edited mark. A target with no text keeps what it has.
+    if let Some(text) = edited_text {
+        if let Ok(changed) = with_text(&kept, &text) {
+            kept = changed;
+            plan.revised.insert(row, (1, None));
+            plan.planned
+                .push(Planned::Put(REVISION, row, None, Zeroizing::new(vec![1])));
+        }
+    }
+
+    keep_reply_as_reference(&mut kept, &open.device_set_key)?;
+
+    // A record of the user from another device left the owner of
+    // the channels, or waits there.
+    let delivery = if from_user {
+        Delivery::Accepted
+    } else {
+        Delivery::Delivered
+    };
+    plan.planned.push(Planned::Put(
+        TableId::MESSAGE,
+        row,
+        Some(conversation.0),
+        stored_message(
+            item.direction,
+            delivery,
+            conversation,
+            open.stamp.next(now_ms),
+            &kept,
+        ),
+    ));
+
+    // WIR-187: the period of a poll runs from its receive time.
+    if parsed.kind == AppKind::Poll {
+        let open_seconds = Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
+        plan.planned.push(Planned::Put(
+            polls::POLLS,
+            row,
+            Some(conversation.0),
+            polls::poll_row(conversation, open_seconds, now),
+        ));
+    }
+
+    if parsed.kind == AppKind::Attachment {
+        let (state, descriptor) = files::incoming_state_row(parsed.body, context.limit);
+        plan.planned.push(Planned::Put(
+            FILE_STATE,
+            row,
+            Some(conversation.0),
+            Zeroizing::new(state),
+        ));
+        if let Some(descriptor) = descriptor {
+            plan.wanted.push(DownloadJob {
+                message,
+                descriptor: Box::new(descriptor),
+            });
+        }
+    }
+
+    // A record of the user raises no alert.
+    plan.events.push(if from_user {
+        Event::Delivery { message, delivery }
+    } else {
+        Event::Message {
+            conversation,
+            message,
+        }
+    });
+
+    // NET-041: this device holds the message now.
+    if !record.synced && context.sends_delivery.contains(&conversation) {
+        plan_delivery_receipt(
+            open,
+            &mut plan.planned,
+            conversation,
+            &parsed.msg_id,
+            now_ms,
+        );
+    }
+
+    Ok(())
+}
+
+/// Plans the read state of each message up to the newest one that a read
+/// receipt of the batch named (`WIR-514`).
+fn plan_reads<B: Backend>(open: &Open<B>, plan: &mut BatchPlan<'_>) -> Result<(), Error> {
+    for (conversation, up_to) in core::mem::take(&mut plan.read_up_to) {
+        for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+            let plain = Zeroizing::new(plain);
+
+            // IMP-121: the plaintext names its owner. A receipt of this
+            // contact moves no record of another conversation. Such a
+            // row is a fault of the file that the user learns of one
+            // time (`IDN-039`). It ends no batch. A batch that failed
+            // for it would acknowledge no record, and each receipt of
+            // this contact would come again at each run.
+            if conversation_of(&plain).ok() != Some(conversation) {
+                if !plan.owner_fault {
+                    plan.owner_fault = true;
+                    plan.events.push(Event::IntegrityFault);
+                }
+                continue;
+            }
+
+            // A message that no relay took is not one that the peer saw.
+            let Some(info) = target_info(&plain, &mut plan.target_fault, &mut plan.events)? else {
+                continue;
+            };
+            let is_sent = matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
+            if !info.outgoing || !is_sent || info.stored_at_ms > up_to {
+                continue;
+            }
+
+            // The receipt changes the state of the newest value of the
+            // row in this batch, thus it puts back no earlier text.
+            let mut plain = match planned_row(&plan.planned, TableId::MESSAGE, row) {
+                Some(Some(value)) => value,
+                Some(None) => continue,
+                None => plain,
+            };
+            let Some(newest) = target_info(&plain, &mut plan.target_fault, &mut plan.events)?
+            else {
+                continue;
+            };
+            if !newest.delivery.is_below(Delivery::Read) {
+                continue;
+            }
+
+            write_delivery(&mut plain, Delivery::Read)?;
+            plan.planned.push(Planned::Put(
+                TableId::MESSAGE,
+                row,
+                Some(conversation.0),
+                plain,
+            ));
+            plan.planned.push(Planned::Delete(OUTBOX, row));
+            plan.delivered.push((row, Delivery::Read));
+            plan.events.push(Event::Delivery {
+                message: MsgRef(row),
+                delivery: Delivery::Read,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// The rows of the record copies of one batch.
+type PendingCopies = Vec<(RowId, Zeroizing<Vec<u8>>)>;
+
+/// Makes the row of each record copy that waits for the other devices of
+/// the set.
+fn pending_copies<B: Backend>(
+    open: &Open<B>,
+    to_publish: &[(ConversationId, &[u8])],
+    now_ms: u64,
+) -> Result<PendingCopies, Error> {
+    // DEV-268, DEV-293: each record of a contact goes to each device of
+    // the set, and its copy waits in the same commit as the record. Each
+    // copy holds its place: the time of this commit, above each copy
+    // that an earlier commit left, and its index in the batch.
+    let mut order_ms = now_ms;
+    if !to_publish.is_empty() {
+        for (_, held) in open.store.list(PUBLISH_PENDING, None)? {
+            let held = Zeroizing::new(held);
+            let at = pending_copy(&held)
+                .and_then(|(order, _, _)| <[u8; 8]>::try_from(order.get(..8)?).ok())
+                .map_or(0, u64::from_be_bytes);
+            order_ms = order_ms.max(at.saturating_add(1));
+        }
+    }
+
+    Ok(to_publish
+        .iter()
+        .enumerate()
+        .map(|(index, (conversation, app))| {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            let order = [order_ms.to_be_bytes().as_slice(), &index.to_be_bytes()].concat();
+            (
+                open.store.row_id(PUBLISH_PENDING, &order),
+                Zeroizing::new([order.as_slice(), &conversation.0, app].concat()),
+            )
+        })
+        .collect())
+}
+
+/// Writes the plan of a batch, the rows that it replays, and the record
+/// copies into one store batch, and commits it.
+fn write_batch<B: Backend, R: CryptoRng + ?Sized>(
+    open: &mut Open<B>,
+    plan: &BatchPlan<'_>,
+    replayed: &[(TableId, RowId)],
+    pending_copies: &[(RowId, Zeroizing<Vec<u8>>)],
+    rng: &mut R,
+) -> Result<(), Error> {
+    let mut batch = open.store.begin();
+    for write in &plan.planned {
+        match write {
+            Planned::Put(table, row, owner, plain) => {
+                batch.put(*table, *row, *owner, plain, rng)?;
+            }
+            Planned::Delete(table, row) => batch.delete(*table, *row),
+        }
+    }
+    for (table, row) in replayed {
+        batch.delete(*table, *row);
+    }
+
+    // IMP-154: an edit keeps no earlier text in the log of the store.
+    if plan
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::Edited { .. }))
+    {
+        batch.erase_earlier();
+    }
+    for (row, value) in pending_copies {
+        batch.put(PUBLISH_PENDING, *row, None, value, rng)?;
+    }
+
+    batch.commit()?;
+
+    Ok(())
 }
 
 /// The fields of a stored message that a record of a batch names, or none

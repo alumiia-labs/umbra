@@ -127,11 +127,11 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     Core.setReceipts(chat.conversation, next)
                 }
                 HorizontalDivider(color = Palette.Divider)
-                ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery, icon = "check") {
+                ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery, icon = "check", tag = TestTags.CONTACT_DELIVERY_RECEIPTS) {
                     change(Receipts(it, now.read))
                 }
                 HorizontalDivider(color = Palette.Divider)
-                ToggleRow(stringResource(R.string.verify_read_receipts), now.read, icon = "eye") {
+                ToggleRow(stringResource(R.string.verify_read_receipts), now.read, icon = "eye", tag = TestTags.CONTACT_READ_RECEIPTS) {
                     change(Receipts(now.delivery, it))
                 }
             }

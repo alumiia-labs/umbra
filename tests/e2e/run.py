@@ -186,6 +186,61 @@ def scenario_messages(devices):
     alice.wait("chat_bubble_state", 30, text="Accepted")
 
 
+def scenario_receipts(devices):
+    """NET-059: a receipt goes only after the user turns it on."""
+    alice, bob = devices[0], devices[1]
+    bob.tap("common_bar_title")
+    bob.tap_node(bob.scroll_to("contact_delivery_receipts"))
+    bob.tap_node(bob.scroll_to("contact_read_receipts"))
+    open_chat(bob, "Alice")
+
+    send(alice, "with receipts")
+    bubble(bob, "chat_bubble_in", "with receipts")
+
+
+def scenario_file(devices):
+    """A file from the picker of the system arrives with its name."""
+    alice, bob = devices[0], devices[1]
+    alice.shell("echo a-file-of-the-test > /sdcard/Download/umbra-note.txt")
+    alice.tap("chat_attach")
+    alice.tap("attach_file")
+
+    # The picker is a view of the system, thus its controls have no test name.
+    alice.tap_node(alice.wait_described("Show roots"))
+    alice.tap_node(alice.wait_text("Downloads"))
+    alice.tap_node(alice.wait_text("umbra-note.txt"))
+
+    alice.wait("message_file", 60, text="umbra-note.txt")
+    bob.wait("message_file", 120, text="umbra-note.txt")
+
+
+def scenario_notification(devices):
+    """A message to an app behind the home screen raises an alert, and no read receipt."""
+    alice, bob = devices[0], devices[1]
+    bob.shell("input keyevent KEYCODE_HOME")
+    time.sleep(3)
+    send(alice, "bob looks at the home screen")
+
+    deadline = time.monotonic() + 120
+    while "tag=message" not in bob.shell("dumpsys notification --noredact", check=False):
+        if time.monotonic() > deadline:
+            raise Fault("the message raised no alert")
+        time.sleep(3)
+
+    bob.start()
+    bubble(bob, "chat_bubble_in", "bob looks at the home screen", 60)
+
+
+def scenario_receipts_arrive(devices):
+    """NET-050: a receipt leaves in a cover slot after its delay, thus it takes minutes."""
+    alice = devices[0]
+    deadline = time.monotonic() + 600
+    while "Accepted" in text_of(bubble(alice, "chat_bubble_out", "with receipts")):
+        if time.monotonic() > deadline:
+            raise Fault("no receipt moved the state of the message")
+        time.sleep(5)
+
+
 def scenario_edit(devices):
     alice, bob = devices[0], devices[1]
     alice.long_press(send(alice, "a text with a mistak"))
@@ -302,7 +357,7 @@ def scenario_lock(devices):
     unlock(alice)
     alice.wait("tabs_chats", 60)
     open_chat(alice, "Bob")
-    bubble(alice, "chat_bubble_in", "first from bob")
+    bubble(alice, "chat_bubble_out", "bob looks at the home screen")
 
 
 def scenario_passphrase(devices):
@@ -428,6 +483,11 @@ def scenario_removal(devices):
     absent(bob, "chat_bubble_in", "after the removal")
     bob.wait("chat_stopped", 60)
 
+    # GRP-306: an earlier message of the removed member keeps its name.
+    earlier = bubble(alice, "chat_bubble_in", "bob sees carol")
+    if "Bob" not in text_of(earlier):
+        raise Fault(f"the message of a removed member shows no name: '{text_of(earlier)}'")
+
     # A member that leaves keeps the history, and can send no more.
     details(carol, "Trio")
     carol.tap_node(carol.scroll_to("group_leave"))
@@ -509,6 +569,13 @@ def scenario_device_removal(devices):
             raise Fault("the removed device stays in the list")
         time.sleep(1)
 
+    # DEV-181: the removed device locks one time, and it then sends no more.
+    tablet.wait("unlock_open", 180)
+    unlock(tablet)
+    tablet.wait("tabs_chats", 60)
+    open_chat_row(tablet, "Bob")
+    tablet.wait("chat_stopped", 60)
+
     open_chat(alice, "Bob")
     send(bob, "after the device removal")
     bubble(alice, "chat_bubble_in", "after the device removal", 60)
@@ -565,6 +632,10 @@ SCENARIOS = [
     ("poll", scenario_poll, 2),
     ("verify", scenario_verify, 2),
     ("search", scenario_search, 2),
+    ("receipts", scenario_receipts, 2),
+    ("file", scenario_file, 2),
+    ("notification", scenario_notification, 2),
+    ("receipts arrive", scenario_receipts_arrive, 2),
     ("lock", scenario_lock, 2),
     ("passphrase", scenario_passphrase, 2),
     ("offline", scenario_offline, 2),

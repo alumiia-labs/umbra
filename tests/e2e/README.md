@@ -47,6 +47,10 @@ Each scenario continues from the state of the one before it.
 | setup | A first launch makes a store and reaches the relays. |
 | contact | One invitation makes one contact on both sides. |
 | messages | A message goes in each direction. |
+| receipts | The contact turns on the two receipts. |
+| file | A file from the picker of the system arrives with its name. |
+| notification | A message to an app behind the home screen raises an alert. |
+| receipts arrive | A receipt moves the state of a sent message. |
 | edit | An edit shows at the contact. |
 | reaction | A reaction shows at the sender. |
 | reply | A reply shows with the text that it answers. |
@@ -60,10 +64,10 @@ Each scenario continues from the state of the one before it.
 | group | An offer, a join, and a let-in make a group of two. |
 | handle | A request to a claimed handle makes a contact. |
 | group of three | A third member joins and each member gets its messages. |
-| removal | A removed member gets no later message. A member that leaves can send no more. |
+| removal | A removed member gets no later message, and its notes keep its name. A member that leaves can send no more. |
 | link | A third emulator joins the device set and gets the contacts. |
 | linked messages | Each device of the set gets a message and can send. |
-| device removal | A removed device leaves the list and gets no later message. |
+| device removal | A removed device leaves the list, locks one time, and can send no more. |
 | restore | An erased device takes its identity again from the recovery code. |
 
 A full run takes about 20 minutes. The third emulator is a third user first. The `link` scenario

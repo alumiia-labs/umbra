@@ -552,6 +552,15 @@ object Core {
         private set
 
     /**
+     * The removal came while the store was open. The view locks the app one
+     * time, thus the person that holds the device needs the passphrase.
+     */
+    var locksForRemoval by mutableStateOf(false)
+
+    // The value of the first read after an unlock is no new removal.
+    private var removalRead = false
+
+    /**
      * Whether a move of the store in this run found a table that did not
      * match its MAC (`IDN-039`). The rows of that table can be damaged or
      * changed.
@@ -612,6 +621,8 @@ object Core {
 
         main.post {
             heldDeletions = held
+            if (removalRead && removed && !removedFromSet) locksForRemoval = true
+            removalRead = true
             removedFromSet = removed
             migrationWasUnsound = unsound
             canTakeOver = takes
@@ -1689,6 +1700,9 @@ object Core {
             }
             is FfiEvent.Locked -> {
                 isStarting = false
+                removalRead = false
+                removedFromSet = false
+                locksForRemoval = false
                 groupOffers.clear()
                 groupJoiners.clear()
                 images.clear()
@@ -1914,6 +1928,8 @@ object Core {
     fun visible(context: Context, nowVisible: Boolean) {
         val app = context.applicationContext
         isVisible = nowVisible
+        // An open conversation marks its messages as read at the return.
+        if (nowVisible) revision++
         // The client makes cover cells while a view is on the screen only.
         call { it.setForeground(nowVisible) }
         // The unlock view shows no message, thus the alerts stay until the
@@ -2530,6 +2546,18 @@ object Core {
         call { client ->
             val members = client.groupMembers(conversation.id)
             main.post { onLoaded(members) }
+        }
+
+    /** The name of each contact that left a group, by the index that it held. */
+    fun formerMemberNames(conversation: Conversation, onLoaded: (Map<UShort, String>) -> Unit) =
+        call { client ->
+            val former = client.groupFormerMembers(conversation.id)
+            main.post {
+                val names = former.mapNotNull { member ->
+                    chats.firstOrNull { it.conversation.id.contentEquals(member.contact) }?.let { member.index to it.title }
+                }
+                onLoaded(names.toMap())
+            }
         }
 
     /** Gives a member a role. The owner credentials follow the admin roles. */

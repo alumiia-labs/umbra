@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.56.2
-**Date:** 2026-11-17
+**Version:** 0.57.0
+**Date:** 2026-11-18
 
 ---
 

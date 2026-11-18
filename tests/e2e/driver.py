@@ -111,6 +111,18 @@ class Device:
                 raise Fault(f"{self.serial}: no text '{text}' after {timeout} s; on the screen: {summary(nodes)}")
             time.sleep(0.5)
 
+    def wait_described(self, description, timeout=30):
+        """Waits for a control of the system by its content description."""
+        deadline = time.monotonic() + timeout
+        while True:
+            nodes = self.nodes()
+            for node in nodes:
+                if node.get("content-desc") == description:
+                    return node
+            if time.monotonic() > deadline:
+                raise Fault(f"{self.serial}: no control '{description}' after {timeout} s; on the screen: {summary(nodes)}")
+            time.sleep(0.5)
+
     def tap_node(self, node):
         left, top, right, bottom = map(int, BOUNDS.match(node.get("bounds")).groups())
         self.shell(f"input tap {(left + right) // 2} {(top + bottom) // 2}")

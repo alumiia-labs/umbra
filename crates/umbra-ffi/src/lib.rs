@@ -3378,6 +3378,39 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn an_admin_names_the_contact_behind_each_member_that_it_added() {
+        let mut rng = Rng(61);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let (group, joined, with_joiner, with_admin) =
+            group_of_two(&mut admin, &mut joiner, &mut rng);
+
+        let at_admin = admin.group_members(group).unwrap();
+        let added = at_admin.iter().find(|member| !member.is_self).unwrap();
+        assert_eq!(added.contact, Some(with_joiner));
+
+        let at_joiner = joiner.group_members(joined).unwrap();
+        let other = at_joiner.iter().find(|member| !member.is_self).unwrap();
+        assert_eq!(other.contact, Some(with_admin));
+
+        // GRP-306: the index of a removed member names the same contact on.
+        assert!(admin.former_member_contacts(group).unwrap().is_empty());
+        let index = added.index;
+        admin
+            .remove_from_group(group, index, 1_700_000_100_000, &mut rng)
+            .unwrap();
+        assert!(admin
+            .group_members(group)
+            .unwrap()
+            .iter()
+            .all(|member| member.is_self));
+        assert_eq!(
+            admin.former_member_contacts(group).unwrap(),
+            vec![(index, with_joiner)]
+        );
+    }
+
     /// Brings `joiner` into a new group of `admin` through the pairwise
     /// channel of §11.9.1, and returns the group at the admin, the group at
     /// the joiner, and the two pairwise conversations.
@@ -5839,6 +5872,14 @@ mod tests {
 
         // No record of the phone leaves on a channel that it owns no more.
         assert!(phone.take_outgoing().is_none());
+
+        // A removed device that owns no channel sends no new message.
+        let mut late = phone.new_draft(phone.conversation_for(&contact.0).unwrap());
+        late.set_text(&units("too late")).unwrap();
+        assert_eq!(
+            phone.send_draft(late, HEARD * 1_000, &mut rng),
+            Err(Error::Refused)
+        );
 
         // A device that an epoch removed takes no set over.
         assert!(!phone

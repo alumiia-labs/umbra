@@ -921,6 +921,59 @@ impl Before {
     }
 }
 
+/// The state of one arrival while the client takes its outcomes.
+struct Arrival {
+    conversation: ConversationId,
+    group: Group,
+    /// The outcomes that wait, with each one that a key or a roster object
+    /// released.
+    outcomes: VecDeque<Outcome>,
+    /// Whether an epoch installed in the group.
+    installed: bool,
+    /// The first message that the arrival stored.
+    first: Option<MsgRef>,
+    /// The heads of this device that a roster object displaced.
+    displaced: Vec<umbra_core::group::roster::Displaced>,
+    /// Whether the head that a snapshot gave is one that no member holds
+    /// (`GRP-440`).
+    misled: bool,
+    now_ms: u64,
+    /// `now_ms` in seconds.
+    now: u64,
+}
+
+/// The fields of one content record that the client reads.
+struct ContentRecord {
+    sender: u16,
+    app: Vec<u8>,
+    counter: u32,
+    epoch: u32,
+    slot: u32,
+    repeated: bool,
+}
+
+/// Tells whether a record does not parse under the layout of a group.
+fn fails_group_layout(parsed: &AppMessage<'_>) -> bool {
+    // A record that does not parse under the layout of a
+    // group goes (WIR-163, WIR-180).
+    // DEV-174: a rich record takes its class from the kind
+    // that it goes around. This client goes around a text
+    // alone, as on a pairwise channel. One around a kind
+    // that is no message would else enter the conversation
+    // as one.
+    match parsed.kind {
+        AppKind::Rich => {
+            umbra_wire::app::rich::RichRecord::parse(parsed.body, umbra_wire::app::Channel::Group)
+                .map_or(true, |rich| {
+                    rich.inner_kind != AppKind::Text
+                        || core::str::from_utf8(rich.inner_body).is_err()
+                })
+        }
+        AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body).is_err(),
+        _ => false,
+    }
+}
+
 /// The public key of the owner credential of the first replica.
 fn owners_pk(group: &Group) -> Option<[u8; 32]> {
     group.owner(0).map(umbra_crypto::seal::public_of)
@@ -5655,6 +5708,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(members)
     }
 
+    /// The contact behind each index that left the group, where this device
+    /// knows it. A group reuses no index (`GRP-306`), thus the name of a
+    /// contact stays right for its earlier messages.
+    pub fn former_member_contacts(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Vec<(u16, ConversationId)>, Error> {
+        let group = self.group_of(conversation)?;
+        let store = &self.open_ref()?.store;
+        let active: Vec<u16> = group.roster().active().map(|member| member.index).collect();
+        let mut former = Vec::new();
+        for index in 0..group.roster().next_index().unwrap_or(0) {
+            if active.contains(&index) {
+                continue;
+            }
+
+            let row = store.row_id(GROUP_MEMBER, &Self::member_key(conversation, index));
+            let contact = store
+                .get(GROUP_MEMBER, &row)?
+                .and_then(|bytes| <[u8; 16]>::try_from(bytes.as_slice()).ok());
+            if let Some(contact) = contact {
+                former.push((index, ConversationId(contact)));
+            }
+        }
+
+        Ok(former)
+    }
+
     fn member_key(conversation: ConversationId, index: u16) -> Vec<u8> {
         let mut key = Vec::with_capacity(18);
         key.extend_from_slice(&conversation.0);
@@ -7400,81 +7481,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub(super) fn take_outcomes<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
-        mut group: Group,
-        mut outcomes: VecDeque<Outcome>,
+        group: Group,
+        outcomes: VecDeque<Outcome>,
         before: Before,
-        mut installed: bool,
+        installed: bool,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
-        let now = now_ms / 1_000;
-        let mut first = None;
-        let mut displaced = Vec::new();
-        let mut misled = false;
-        while let Some(outcome) = outcomes.pop_front() {
+        let mut arrival = Arrival {
+            conversation,
+            group,
+            outcomes,
+            installed,
+            first: None,
+            displaced: Vec::new(),
+            misled: false,
+            now_ms,
+            now: now_ms / 1_000,
+        };
+        while let Some(outcome) = arrival.outcomes.pop_front() {
             match outcome {
                 Outcome::EpochKey {
                     epoch,
                     start_slot,
                     body,
-                } => {
-                    // An epoch-key record names no sender that this
-                    // device can check, thus it cancels no answer. The
-                    // `KeySupply` notice of an active member does that
-                    // (`GRP-375`).
-
-                    // GRP-284: the slot of a chunked record waits on the
-                    // chunk path, and this device fetches its one chunk.
-                    if let Ok(Some(wanted)) = group.wanted_chunk(epoch, start_slot, &body, now) {
-                        // Each replica carries the record, and one fetch
-                        // serves both. A record of the same epoch that
-                        // names another chunk takes a fetch of its own,
-                        // thus a false one that came first hides no true
-                        // one; `EPOCH_CHUNKS_MAX` bounds them.
-                        let mut same_epoch =
-                            self.groups.epoch_chunks.iter().filter(|(held, other)| {
-                                *held == conversation && other.epoch == wanted.epoch
-                            });
-                        let fetching = same_epoch.clone().any(|(_, other)| *other == wanted);
-                        if !fetching && same_epoch.nth(EPOCH_CHUNKS_MAX.saturating_sub(1)).is_none()
-                        {
-                            self.groups.epoch_chunks.push_back((conversation, wanted));
-                        }
-                        continue;
-                    }
-
-                    let before = group.epoch();
-                    let is_one_slot = group.slot_indices(&body).len() == 1;
-                    if group
-                        .install_epoch_key(epoch, start_slot, &body, now)
-                        .is_ok()
-                    {
-                        installed = true;
-
-                        // WIR-462: a one-slot record that brings the next
-                        // epoch is a key supply for a rotation that this
-                        // device missed. A delivery of owner credentials
-                        // names the epoch that the device holds.
-                        if is_one_slot && epoch == before.saturating_add(1) {
-                            let key = recovered_key(conversation, epoch);
-                            self.put_clock(conversation, key, now, rng)?;
-                        }
-
-                        // GRP-252: a record of the new epoch that arrived
-                        // before its key waited, and it opens now.
-                        outcomes.extend(group.retry_held(now));
-                    } else if epoch == group.epoch().saturating_add(1) && !self.owns_channels()? {
-                        // DEV-303: the roster object that calls for this
-                        // epoch comes on the sync channel, and it can come
-                        // after the key.
-                        self.hold_epoch_key(conversation, epoch, start_slot, &body, rng)?;
-                    }
-                }
+                } => self.take_epoch_key(&mut arrival, epoch, start_slot, &body, rng)?,
                 Outcome::Presence { sender } => {
                     // The time of a member is beside its record. A fault of it
                     // ends no outcome, and the next record of the member
                     // writes the time again.
-                    let seen = self.note_seen(conversation, &group, sender, now, rng);
+                    let seen =
+                        self.note_seen(conversation, &arrival.group, sender, arrival.now, rng);
                     self.defer_fault(seen.err());
                 }
                 Outcome::Content {
@@ -7486,277 +7523,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     repeated,
                     ..
                 } => {
-                    let seen = self.note_seen(conversation, &group, sender, now, rng);
-                    self.defer_fault(seen.err());
-
-                    // GRP-251: a record whose app does not parse is one
-                    // silent drop; it ends no other outcome of the arrival.
-                    let Ok(parsed) =
-                        umbra_wire::app::AppMessage::parse(&app, umbra_wire::app::Channel::Group)
-                    else {
-                        continue;
-                    };
-
-                    // A request of a member that lacks the epoch, and the
-                    // notice that one was answered, are no messages.
-                    if parsed.kind == AppKind::KeyRequest {
-                        self.on_key_request(conversation, &group, sender, parsed.body, now, rng);
-                        continue;
-                    }
-                    if parsed.kind == AppKind::KeySupply {
-                        // GRP-375: a supply for a member that this device
-                        // meant to answer came first, thus it stands down.
-                        let is_active = group
-                            .roster()
-                            .member(sender)
-                            .is_some_and(|member| member.active);
-                        if let Some(index) =
-                            supplied_index(&group, parsed.body).filter(|_| is_active)
-                        {
-                            self.groups.key_answers.remove(&(conversation, index));
-                        }
-                        continue;
-                    }
-
-                    // A roster object moves the roster and is no message
-                    // (`GRP-318`), and a record that waited for it opens.
-                    if parsed.kind == AppKind::GroupControl {
-                        if let Ok(control) = GroupControl::parse(parsed.body) {
-                            // GRP-330: a notice names a snapshot, and it
-                            // moves no roster.
-                            if control.control_type == ControlType::SnapshotNotice {
-                                self.on_snapshot_notice(
-                                    conversation,
-                                    &group,
-                                    sender,
-                                    control.payload,
-                                    rng,
-                                )?;
-                                continue;
-                            }
-
-                            let forks = group.roster().forks().len();
-
-                            // GRP-076: the rates of the chain count on the
-                            // slot of the record that carried the object.
-                            let applied = group.apply_control_at(&control, sender, slot, now);
-
-                            // GRP-070, GRP-071: a fork shows, and the member
-                            // picks no successor in silence.
-                            self.note_forks(conversation, &group, forks, now_ms, rng)?;
-                            match applied {
-                                Ok(applied) => {
-                                    if let Some(head) = group.take_displaced() {
-                                        displaced.push(head);
-                                    }
-                                    if group.roster().keeps_for_path(&applied) {
-                                        self.note_grant(conversation, parsed.body, rng)?;
-                                    }
-
-                                    self.roster_moved(conversation, &applied, now, rng)?;
-                                    outcomes.extend(group.retry_held(now));
-                                }
-                                // GRP-440: the head that the snapshot gave is
-                                // one that no member holds.
-                                Err(umbra_core::Error::NoPath) => {
-                                    misled |=
-                                        group.roster().breaks_snapshot(&control, sender, slot, now);
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                        continue;
-                    }
-
-                    // ABU-036, ABU-038: a record of a blocked member goes,
-                    // and the view counts it.
-                    if self.is_member_blocked(conversation, sender)? {
-                        // GRP-206: each replica gives the record, and the
-                        // view counts it once.
-                        if !repeated {
-                            self.count_discarded(conversation, rng)?;
-                        }
-                        continue;
-                    }
-
-                    // GRP-206, GRP-259: a record under a counter that this
-                    // device took already is a copy. The other replica gave
-                    // it, or a replica kept it. A message drops at its
-                    // `msg_id` in the store. An edit, a deletion and a vote
-                    // enter no row of their own, thus the mark of the
-                    // receiver drops their copy here. An edit that applied
-                    // again would count one more revision, and it would put
-                    // its text over the text of an edit after it. The one
-                    // record that goes with a copy is the second record of
-                    // two devices under one counter (`GRP-342`). The
-                    // counter cannot tell it from a copy.
-                    if repeated
-                        && matches!(
-                            parsed.kind,
-                            AppKind::Edit | AppKind::Delete | AppKind::PollVote
-                        )
-                    {
-                        continue;
-                    }
-
-                    // An edit and a deletion of an author name a message of
-                    // that member alone (Part 11 §11.9.6).
-                    if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
-                        self.take_group_change(conversation, Some(sender), &parsed, now_ms, rng)?;
-                        continue;
-                    }
-
-                    // GRP-336: a vote is one group record, and each member
-                    // counts it in the order of its sender (WIR-190). The
-                    // order is the index, then the epoch, then the counter,
-                    // which starts again in each epoch (GRP-246). A re-key
-                    // moves a member to a higher index in the epoch that
-                    // stands and starts its counter again. Thus the index
-                    // comes first: the vote after the re-key is the later
-                    // one.
-                    if parsed.kind == AppKind::PollVote {
-                        // The two highest values name the user and the peer
-                        // of a pairwise poll. A member at such an index
-                        // would write the vote of the user.
-                        if sender >= super::polls::VOTER_PEER {
-                            continue;
-                        }
-
-                        // The position holds 16 bits of the epoch. An epoch
-                        // above them takes the highest value, thus the
-                        // order never runs back.
-                        let position = (u64::from(sender) << 48)
-                            | (u64::from(epoch).min(0xFFFF) << 32)
-                            | u64::from(counter);
-                        self.take_vote(conversation, parsed.body, sender, position, now, rng)?;
-                        continue;
-                    }
-
-                    // WIR-075, GRP-299, GRP-300: a group stores the kinds of
-                    // a message alone. A receipt, a typing indicator, and
-                    // each kind of the pairwise channel make no row and no
-                    // alert. Part 11 gives a reaction no rule in a group,
-                    // and the view offers none, thus it goes as well.
-                    if !matches!(
-                        parsed.kind,
-                        AppKind::Text
-                            | AppKind::Attachment
-                            | AppKind::Rich
-                            | AppKind::Poll
-                            | AppKind::ConversationTimer
-                            | AppKind::ForwardPolicy
-                    ) {
-                        continue;
-                    }
-
-                    // A record that does not parse under the layout of a
-                    // group goes (WIR-163, WIR-180).
-                    // DEV-174: a rich record takes its class from the kind
-                    // that it goes around. This client goes around a text
-                    // alone, as on a pairwise channel. One around a kind
-                    // that is no message would else enter the conversation
-                    // as one.
-                    let is_invalid = match parsed.kind {
-                        AppKind::Rich => umbra_wire::app::rich::RichRecord::parse(
-                            parsed.body,
-                            umbra_wire::app::Channel::Group,
-                        )
-                        .map_or(true, |rich| {
-                            rich.inner_kind != AppKind::Text
-                                || core::str::from_utf8(rich.inner_body).is_err()
-                        }),
-                        AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body).is_err(),
-                        _ => false,
-                    };
-                    if is_invalid {
-                        continue;
-                    }
-
-                    // DEV-093, DEV-102: a deletion of its author came first.
-                    // The view shows nothing at that position, and no alert
-                    // goes. The entry stays, thus the copy of the other
-                    // replica stays out too.
-                    if self.held_group_deletion(conversation, &parsed.msg_id, sender, now_ms)? {
-                        continue;
-                    }
-
-                    // DEV-249: a timer record of a member below admin goes.
-                    let timer = if parsed.kind == AppKind::ConversationTimer {
-                        let is_admin = group
-                            .roster()
-                            .member(sender)
-                            .is_some_and(|member| member.role >= Role::Admin);
-                        match super::timers::timer_body(parsed.body) {
-                            Some(seconds) if is_admin => Some(seconds),
-                            _ => continue,
-                        }
-                    } else {
-                        None
-                    };
-
-                    // DEV-325: a policy record of a member below admin
-                    // goes, and so does one that is older than the policy
-                    // of the group (`DEV-323`).
-                    if parsed.kind == AppKind::ForwardPolicy {
-                        let is_admin = group
-                            .roster()
-                            .member(sender)
-                            .is_some_and(|member| member.role >= Role::Admin);
-                        let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body)
-                        else {
-                            continue;
-                        };
-                        if !is_admin
-                            || !self.take_group_forward_policy(conversation, &policy, rng)?
-                        {
-                            continue;
-                        }
-                    }
-
-                    let is_recovered = self.clock(&recovered_key(conversation, epoch))?.is_some();
-                    let stored = self.store_group_message(
-                        conversation,
-                        &app,
+                    let record = ContentRecord {
                         sender,
-                        is_recovered,
-                        now_ms,
-                        rng,
-                    )?;
-                    if let Some(message) = stored {
-                        self.after_group_store(conversation, &group, message, &app, now, rng)?;
-                        match timer {
-                            Some(seconds) => {
-                                self.put_timer(conversation, seconds, now_ms, false, rng)?
-                            }
-                            None => {
-                                self.stamp_deadline(conversation, message, parsed.kind, now, rng)?
-                            }
-                        }
-
-                        // DEV-093: an edit of its author that a replica gave
-                        // first applies now.
-                        self.take_held_group_change(
-                            conversation,
-                            message,
-                            &parsed.msg_id,
-                            sender,
-                            now_ms,
-                            rng,
-                        )?;
-
-                        // The sender row loses its wait mark last, thus a
-                        // run that ends before this point runs each step
-                        // again at the next copy of the record.
-                        self.put_group_sender(conversation, message, sender, is_recovered, rng)?;
-                    }
-
-                    first = first.or(stored);
+                        app,
+                        counter,
+                        epoch,
+                        slot,
+                        repeated,
+                    };
+                    self.take_content(&mut arrival, &record, rng)?;
                 }
                 // GRP-229: the list shows the `clock` state. A record of an
                 // epoch that this member lacks waits too, and it names no
                 // clock (`GRP-289`).
                 Outcome::ClockSuspect => {
-                    if group.holds_clock_suspect(now)
+                    if arrival.group.holds_clock_suspect(arrival.now)
                         && self.groups.clock_suspect.insert(conversation)
                     {
                         self.events.push_back(Event::Conversations);
@@ -7765,10 +7546,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // GRP-357: an epoch whose slot waited for its roster object
                 // installed in the group. The records that waited for its
                 // key follow in the same list.
-                Outcome::EpochInstalled { .. } => installed = true,
+                Outcome::EpochInstalled { .. } => arrival.installed = true,
                 Outcome::Held | Outcome::Duplicate => {}
             }
         }
+
+        let Arrival {
+            group,
+            installed,
+            first,
+            displaced,
+            misled,
+            ..
+        } = arrival;
 
         // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
@@ -7779,20 +7569,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // credentials that it holds no more.
         let owners_moved = owners_pk(&group) != before.owners;
         if owners_moved && before.owners.is_some() {
-            // An owed delivery stays owed: it then carries the credentials
-            // that this device holds now.
-            let owed = self
-                .gkey_row(conversation)
-                .map(|held| held.owed)
-                .unwrap_or_default();
-            let fresh = GkeyRow {
-                owed,
-                ..GkeyRow::default()
-            };
-            self.put_gkey_row(conversation, &fresh, rng)?;
-            self.groups
-                .gkey_sent
-                .retain(|(held, _), _| *held != conversation);
+            self.forget_own_gkeys(conversation, rng)?;
         }
 
         // GRP-370: a rival re-key took the index of this member.
@@ -7800,50 +7577,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.ask_to_return(conversation, now_ms, rng)?;
         }
 
-        // The group is in the store. An act that the roster refuses now
-        // is void, and no fault of a repost ends the steps after it.
-        for head in displaced {
-            let reposted = self.repost_displaced(conversation, head.hash, now_ms, rng);
-            self.defer_fault(
-                reposted
-                    .err()
-                    .filter(|fault| !matches!(fault, Error::Malformed | Error::NotFound)),
-            );
-        }
+        self.repost_displaced_heads(conversation, displaced, now_ms, rng);
 
         self.drop_passed_adds(conversation)?;
 
-        // GRP-363: an admin that installs an epoch it did not credential
-        // moves each replica to it. A delivery of owner credentials alone
-        // installs no epoch. GRP-364: a switch to the secret of a lower
-        // rotator of the same epoch moves each replica too. A device that
-        // reads the backlog of its `GSUB` installs each epoch that the
-        // group left on its way. A `GKEY` of one would move a replica back
-        // to it (§11.4.1). Thus the `GKEY` waits for the end of the
-        // backlog, where `Client::watches` sends the one of the epoch that
-        // stands. GRP-364: a content record under the alternate secret can
-        // change the rotator with no install, and the replicas follow that
-        // change too.
-        let epoch_moved = installed && group.epoch() != before.epoch;
-        if epoch_moved || group.epoch_rotator() != before.rotator {
-            let read_backlog = !self.groups.driven
-                || self
-                    .groups
-                    .watch
-                    .get(&conversation)
-                    .is_some_and(|watch| watch.caught_up);
-            if read_backlog && group.lacks_epoch().is_none() {
-                self.queue_gkeys(conversation, &group, false)?;
-            }
-
-            // GRP-405: the epoch that a lapsed member lacked arrived, and
-            // the credentials of it take its records again. GRP-210: a
-            // group that each replica refused takes a new epoch, thus its
-            // queue is not gone, and the next command tells again.
-            if self.group_closed(conversation)? {
-                self.reopen_group(conversation, rng)?;
-            }
-        }
+        self.follow_epoch_move(conversation, &group, &before, installed, rng)?;
 
         // GRP-402: owner credentials from another admin answer the call for
         // them, thus this admin stands down.
@@ -7860,6 +7598,467 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         Ok(first)
+    }
+
+    /// Takes one epoch-key record: it starts the fetch of a chunk, installs
+    /// the epoch, or holds the key for its roster object.
+    fn take_epoch_key<R: CryptoRng + ?Sized>(
+        &mut self,
+        arrival: &mut Arrival,
+        epoch: u32,
+        start_slot: u32,
+        body: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let conversation = arrival.conversation;
+        let now = arrival.now;
+
+        // An epoch-key record names no sender that this
+        // device can check, thus it cancels no answer. The
+        // `KeySupply` notice of an active member does that
+        // (`GRP-375`).
+
+        // GRP-284: the slot of a chunked record waits on the
+        // chunk path, and this device fetches its one chunk.
+        if let Ok(Some(wanted)) = arrival.group.wanted_chunk(epoch, start_slot, body, now) {
+            // Each replica carries the record, and one fetch
+            // serves both. A record of the same epoch that
+            // names another chunk takes a fetch of its own,
+            // thus a false one that came first hides no true
+            // one; `EPOCH_CHUNKS_MAX` bounds them.
+            let mut same_epoch = self
+                .groups
+                .epoch_chunks
+                .iter()
+                .filter(|(held, other)| *held == conversation && other.epoch == wanted.epoch);
+            let fetching = same_epoch.clone().any(|(_, other)| *other == wanted);
+            if !fetching && same_epoch.nth(EPOCH_CHUNKS_MAX.saturating_sub(1)).is_none() {
+                self.groups.epoch_chunks.push_back((conversation, wanted));
+            }
+            return Ok(());
+        }
+
+        let before = arrival.group.epoch();
+        let is_one_slot = arrival.group.slot_indices(body).len() == 1;
+        if arrival
+            .group
+            .install_epoch_key(epoch, start_slot, body, now)
+            .is_ok()
+        {
+            arrival.installed = true;
+
+            // WIR-462: a one-slot record that brings the next
+            // epoch is a key supply for a rotation that this
+            // device missed. A delivery of owner credentials
+            // names the epoch that the device holds.
+            if is_one_slot && epoch == before.saturating_add(1) {
+                let key = recovered_key(conversation, epoch);
+                self.put_clock(conversation, key, now, rng)?;
+            }
+
+            // GRP-252: a record of the new epoch that arrived
+            // before its key waited, and it opens now.
+            arrival.outcomes.extend(arrival.group.retry_held(now));
+        } else if epoch == arrival.group.epoch().saturating_add(1) && !self.owns_channels()? {
+            // DEV-303: the roster object that calls for this
+            // epoch comes on the sync channel, and it can come
+            // after the key.
+            self.hold_epoch_key(conversation, epoch, start_slot, body, rng)?;
+        }
+
+        Ok(())
+    }
+
+    /// Takes one content record: a key request, a key supply, a roster
+    /// object, a change of a message, a vote, or a message.
+    fn take_content<R: CryptoRng + ?Sized>(
+        &mut self,
+        arrival: &mut Arrival,
+        record: &ContentRecord,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let conversation = arrival.conversation;
+        let sender = record.sender;
+        let now = arrival.now;
+        let now_ms = arrival.now_ms;
+
+        let seen = self.note_seen(conversation, &arrival.group, sender, now, rng);
+        self.defer_fault(seen.err());
+
+        // GRP-251: a record whose app does not parse is one
+        // silent drop; it ends no other outcome of the arrival.
+        let Ok(parsed) =
+            umbra_wire::app::AppMessage::parse(&record.app, umbra_wire::app::Channel::Group)
+        else {
+            return Ok(());
+        };
+
+        // A request of a member that lacks the epoch, and the
+        // notice that one was answered, are no messages.
+        if parsed.kind == AppKind::KeyRequest {
+            self.on_key_request(conversation, &arrival.group, sender, parsed.body, now, rng);
+            return Ok(());
+        }
+        if parsed.kind == AppKind::KeySupply {
+            // GRP-375: a supply for a member that this device
+            // meant to answer came first, thus it stands down.
+            let is_active = arrival
+                .group
+                .roster()
+                .member(sender)
+                .is_some_and(|member| member.active);
+            if let Some(index) = supplied_index(&arrival.group, parsed.body).filter(|_| is_active) {
+                self.groups.key_answers.remove(&(conversation, index));
+            }
+            return Ok(());
+        }
+
+        // A roster object moves the roster and is no message
+        // (`GRP-318`), and a record that waited for it opens.
+        if parsed.kind == AppKind::GroupControl {
+            return self.take_group_control(arrival, sender, record.slot, parsed.body, rng);
+        }
+
+        // ABU-036, ABU-038: a record of a blocked member goes,
+        // and the view counts it.
+        if self.is_member_blocked(conversation, sender)? {
+            // GRP-206: each replica gives the record, and the
+            // view counts it once.
+            if !record.repeated {
+                self.count_discarded(conversation, rng)?;
+            }
+            return Ok(());
+        }
+
+        // GRP-206, GRP-259: a record under a counter that this
+        // device took already is a copy. The other replica gave
+        // it, or a replica kept it. A message drops at its
+        // `msg_id` in the store. An edit, a deletion and a vote
+        // enter no row of their own, thus the mark of the
+        // receiver drops their copy here. An edit that applied
+        // again would count one more revision, and it would put
+        // its text over the text of an edit after it. The one
+        // record that goes with a copy is the second record of
+        // two devices under one counter (`GRP-342`). The
+        // counter cannot tell it from a copy.
+        if record.repeated
+            && matches!(
+                parsed.kind,
+                AppKind::Edit | AppKind::Delete | AppKind::PollVote
+            )
+        {
+            return Ok(());
+        }
+
+        // An edit and a deletion of an author name a message of
+        // that member alone (Part 11 §11.9.6).
+        if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
+            self.take_group_change(conversation, Some(sender), &parsed, now_ms, rng)?;
+            return Ok(());
+        }
+
+        // GRP-336: a vote is one group record, and each member
+        // counts it in the order of its sender (WIR-190). The
+        // order is the index, then the epoch, then the counter,
+        // which starts again in each epoch (GRP-246). A re-key
+        // moves a member to a higher index in the epoch that
+        // stands and starts its counter again. Thus the index
+        // comes first: the vote after the re-key is the later
+        // one.
+        if parsed.kind == AppKind::PollVote {
+            return self.take_group_vote(conversation, record, parsed.body, now, rng);
+        }
+
+        let stored = self.take_group_message(arrival, record, &parsed, rng)?;
+        arrival.first = arrival.first.or(stored);
+
+        Ok(())
+    }
+
+    /// Takes one roster object of a member, or the notice of a snapshot,
+    /// and releases each record that waited for the object.
+    fn take_group_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        arrival: &mut Arrival,
+        sender: u16,
+        slot: u32,
+        body: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let conversation = arrival.conversation;
+        let now = arrival.now;
+
+        let Ok(control) = GroupControl::parse(body) else {
+            return Ok(());
+        };
+
+        // GRP-330: a notice names a snapshot, and it
+        // moves no roster.
+        if control.control_type == ControlType::SnapshotNotice {
+            self.on_snapshot_notice(conversation, &arrival.group, sender, control.payload, rng)?;
+            return Ok(());
+        }
+
+        let forks = arrival.group.roster().forks().len();
+
+        // GRP-076: the rates of the chain count on the
+        // slot of the record that carried the object.
+        let applied = arrival.group.apply_control_at(&control, sender, slot, now);
+
+        // GRP-070, GRP-071: a fork shows, and the member
+        // picks no successor in silence.
+        self.note_forks(conversation, &arrival.group, forks, arrival.now_ms, rng)?;
+        match applied {
+            Ok(applied) => {
+                if let Some(head) = arrival.group.take_displaced() {
+                    arrival.displaced.push(head);
+                }
+                if arrival.group.roster().keeps_for_path(&applied) {
+                    self.note_grant(conversation, body, rng)?;
+                }
+
+                self.roster_moved(conversation, &applied, now, rng)?;
+                arrival.outcomes.extend(arrival.group.retry_held(now));
+            }
+            // GRP-440: the head that the snapshot gave is
+            // one that no member holds.
+            Err(umbra_core::Error::NoPath) => {
+                arrival.misled |= arrival
+                    .group
+                    .roster()
+                    .breaks_snapshot(&control, sender, slot, now);
+            }
+            Err(_) => {}
+        }
+
+        Ok(())
+    }
+
+    /// Counts one vote of a member at its position in the order of the
+    /// sender.
+    fn take_group_vote<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        record: &ContentRecord,
+        body: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let sender = record.sender;
+
+        // The two highest values name the user and the peer
+        // of a pairwise poll. A member at such an index
+        // would write the vote of the user.
+        if sender >= super::polls::VOTER_PEER {
+            return Ok(());
+        }
+
+        // The position holds 16 bits of the epoch. An epoch
+        // above them takes the highest value, thus the
+        // order never runs back.
+        let position = (u64::from(sender) << 48)
+            | (u64::from(record.epoch).min(0xFFFF) << 32)
+            | u64::from(record.counter);
+        self.take_vote(conversation, body, sender, position, now, rng)?;
+
+        Ok(())
+    }
+
+    /// Stores one record of a message kind, and runs the steps after the
+    /// store. The result is `None` for a record that makes no message.
+    fn take_group_message<R: CryptoRng + ?Sized>(
+        &mut self,
+        arrival: &Arrival,
+        record: &ContentRecord,
+        parsed: &AppMessage<'_>,
+        rng: &mut R,
+    ) -> Result<Option<MsgRef>, Error> {
+        let conversation = arrival.conversation;
+        let group = &arrival.group;
+        let sender = record.sender;
+        let now = arrival.now;
+        let now_ms = arrival.now_ms;
+
+        // WIR-075, GRP-299, GRP-300: a group stores the kinds of
+        // a message alone. A receipt, a typing indicator, and
+        // each kind of the pairwise channel make no row and no
+        // alert. Part 11 gives a reaction no rule in a group,
+        // and the view offers none, thus it goes as well.
+        if !matches!(
+            parsed.kind,
+            AppKind::Text
+                | AppKind::Attachment
+                | AppKind::Rich
+                | AppKind::Poll
+                | AppKind::ConversationTimer
+                | AppKind::ForwardPolicy
+        ) {
+            return Ok(None);
+        }
+
+        if fails_group_layout(parsed) {
+            return Ok(None);
+        }
+
+        // DEV-093, DEV-102: a deletion of its author came first.
+        // The view shows nothing at that position, and no alert
+        // goes. The entry stays, thus the copy of the other
+        // replica stays out too.
+        if self.held_group_deletion(conversation, &parsed.msg_id, sender, now_ms)? {
+            return Ok(None);
+        }
+
+        // DEV-249: a timer record of a member below admin goes.
+        let timer = if parsed.kind == AppKind::ConversationTimer {
+            let is_admin = group
+                .roster()
+                .member(sender)
+                .is_some_and(|member| member.role >= Role::Admin);
+            match super::timers::timer_body(parsed.body) {
+                Some(seconds) if is_admin => Some(seconds),
+                _ => return Ok(None),
+            }
+        } else {
+            None
+        };
+
+        // DEV-325: a policy record of a member below admin
+        // goes, and so does one that is older than the policy
+        // of the group (`DEV-323`).
+        if parsed.kind == AppKind::ForwardPolicy {
+            let is_admin = group
+                .roster()
+                .member(sender)
+                .is_some_and(|member| member.role >= Role::Admin);
+            let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body) else {
+                return Ok(None);
+            };
+            if !is_admin || !self.take_group_forward_policy(conversation, &policy, rng)? {
+                return Ok(None);
+            }
+        }
+
+        let is_recovered = self
+            .clock(&recovered_key(conversation, record.epoch))?
+            .is_some();
+        let stored =
+            self.store_group_message(conversation, &record.app, sender, is_recovered, now_ms, rng)?;
+        if let Some(message) = stored {
+            self.after_group_store(conversation, group, message, &record.app, now, rng)?;
+            match timer {
+                Some(seconds) => self.put_timer(conversation, seconds, now_ms, false, rng)?,
+                None => self.stamp_deadline(conversation, message, parsed.kind, now, rng)?,
+            }
+
+            // DEV-093: an edit of its author that a replica gave
+            // first applies now.
+            self.take_held_group_change(
+                conversation,
+                message,
+                &parsed.msg_id,
+                sender,
+                now_ms,
+                rng,
+            )?;
+
+            // The sender row loses its wait mark last, thus a
+            // run that ends before this point runs each step
+            // again at the next copy of the record.
+            self.put_group_sender(conversation, message, sender, is_recovered, rng)?;
+        }
+
+        Ok(stored)
+    }
+
+    /// Clears what this device knew of its own `GKEY` commands (`GRP-400`).
+    fn forget_own_gkeys<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        // An owed delivery stays owed: it then carries the credentials
+        // that this device holds now.
+        let owed = self
+            .gkey_row(conversation)
+            .map(|held| held.owed)
+            .unwrap_or_default();
+        let fresh = GkeyRow {
+            owed,
+            ..GkeyRow::default()
+        };
+        self.put_gkey_row(conversation, &fresh, rng)?;
+        self.groups
+            .gkey_sent
+            .retain(|(held, _), _| *held != conversation);
+
+        Ok(())
+    }
+
+    /// Posts again each act of this device that a roster object displaced.
+    fn repost_displaced_heads<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        displaced: Vec<umbra_core::group::roster::Displaced>,
+        now_ms: u64,
+        rng: &mut R,
+    ) {
+        // The group is in the store. An act that the roster refuses now
+        // is void, and no fault of a repost ends the steps after it.
+        for head in displaced {
+            let reposted = self.repost_displaced(conversation, head.hash, now_ms, rng);
+            self.defer_fault(
+                reposted
+                    .err()
+                    .filter(|fault| !matches!(fault, Error::Malformed | Error::NotFound)),
+            );
+        }
+    }
+
+    /// Moves each replica to an epoch or a rotator that changed in the
+    /// arrival, and opens a closed group again.
+    fn follow_epoch_move<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        before: &Before,
+        installed: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        // GRP-363: an admin that installs an epoch it did not credential
+        // moves each replica to it. A delivery of owner credentials alone
+        // installs no epoch. GRP-364: a switch to the secret of a lower
+        // rotator of the same epoch moves each replica too. A device that
+        // reads the backlog of its `GSUB` installs each epoch that the
+        // group left on its way. A `GKEY` of one would move a replica back
+        // to it (§11.4.1). Thus the `GKEY` waits for the end of the
+        // backlog, where `Client::watches` sends the one of the epoch that
+        // stands. GRP-364: a content record under the alternate secret can
+        // change the rotator with no install, and the replicas follow that
+        // change too.
+        let epoch_moved = installed && group.epoch() != before.epoch;
+        if !epoch_moved && group.epoch_rotator() == before.rotator {
+            return Ok(());
+        }
+
+        let read_backlog = !self.groups.driven
+            || self
+                .groups
+                .watch
+                .get(&conversation)
+                .is_some_and(|watch| watch.caught_up);
+        if read_backlog && group.lacks_epoch().is_none() {
+            self.queue_gkeys(conversation, group, false)?;
+        }
+
+        // GRP-405: the epoch that a lapsed member lacked arrived, and
+        // the credentials of it take its records again. GRP-210: a
+        // group that each replica refused takes a new epoch, thus its
+        // queue is not gone, and the next command tells again.
+        if self.group_closed(conversation)? {
+            self.reopen_group(conversation, rng)?;
+        }
+
+        Ok(())
     }
 
     /// Stores one message of a group that arrived, with its sender row, and

@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -108,43 +110,232 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
+    val composer = rememberPlatformField()
+    val state = remember(conversation) { ChatState(composer, unseenAtOpen = chat.unread) }
 
-    // WIR-273: the records of one thread show together, under their root.
-    var threadOf by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
-    BackHandler(enabled = threadOf != null) { threadOf = null }
+    BackHandler(enabled = state.threadOf != null) { state.threadOf = null }
 
+    ChatListEffects(conversation, state, lines, listState) { loaded -> lines = loaded }
+
+    // Part 6 §6.6.9: the text of the field starts and ends a typing state.
+    LaunchedEffect(conversation) {
+        composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
+    }
+
+    val scope = rememberCoroutineScope()
+    val jumpTo = { target: List<Byte> ->
+        val at = lines.indexOfFirst { it.key == target }
+
+        if (at >= 0) {
+            scope.launch {
+                // The first item of the list is the chip of the view.
+                listState.animateScrollToItem(at + 1)
+                state.flashed = target
+                delay(900)
+                state.flashed = null
+            }
+        }
+    }
+
+    ChatTargetJump(conversation, target, lines, listState, state)
+
+    DisposableEffect(conversation) { onDispose { state.unsent.wipe() } }
+
+    ChatStatusEffects(chat, state)
+
+    val save = rememberSave()
+
+    ChatRecordingGuard(conversation, state)
+    ChatDraftEffects(conversation, state)
+    val onRecord = rememberVoiceStart(state)
+    ChatNoticeEffects(state)
+
+    ChatSheets(chat, state, save)
+
+    Column(Modifier.fillMaxSize()) {
+        ChatTopBar(chat, state, onBack, push)
+        BlockedLine(chat)
+        ChatBanners(chat, state.isQueueFull)
+
+        MessageList(Modifier.weight(1f), chat, state, lines, listState, save, push, jumpTo)
+        ChatNotices(chat, state)
+
+        // An answer and an edit start with the keyboard open, as a user
+        // expects it.
+        LaunchedEffect(state.answered, state.edited) {
+            if (state.answered != null || state.edited != null) composer.focus()
+        }
+
+        AttachSheet(chat, state, push)
+
+        val stopped = stoppedNote(chat, state.ownRole)
+        if (stopped != null) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
+                Note(stopped, tag = TestTags.CHAT_STOPPED)
+            }
+            return@Column
+        }
+
+        // IDN-025: a key change blocks the conversation until the answer.
+        state.keyChange?.let { pending ->
+            KeyChangePanel(chat, pending) { push(Screen.Verify(conversation)) }
+            return@Column
+        }
+
+        // NET-355: the question blocks nothing, and the composer stays.
+        if (state.asksRenewal) RenewalPanel(chat)
+
+        AudioEncodingRow(conversation)
+        Composer(chat, state, onRecord)
+    }
+}
+
+/**
+ * The state that the parts of one conversation view share. One instance lives
+ * for one conversation, thus each value starts again with a new conversation.
+ */
+private class ChatState(
+    val composer: PlatformFieldState,
     // The count of the messages that the user did not see, at the moment the
     // view opened. The read marker moves at once, and the line stays where
     // it was for this visit.
-    val unseenAtOpen = remember(conversation) { chat.unread }
-    var newFrom by remember(conversation) { mutableStateOf<ULong?>(null) }
-    var isPlaced by remember(conversation) { mutableStateOf(false) }
+    val unseenAtOpen: Int,
+) {
+    // WIR-273: the records of one thread show together, under their root.
+    var threadOf by mutableStateOf<List<Byte>?>(null)
+
+    var newFrom by mutableStateOf<ULong?>(null)
+    var isPlaced by mutableStateOf(false)
 
     // Whether the list follows its end at the next load. A user at the end
     // stays there when a message comes or when the newest bubble grows, by a
     // reaction or an edit. A user who reads further up stays there. A send of
     // this user leads to the end.
-    var followsEnd by remember(conversation) { mutableStateOf(false) }
-    var jumpsAtNextLoad by remember(conversation) { mutableStateOf(false) }
+    var followsEnd by mutableStateOf(false)
+    var jumpsAtNextLoad by mutableStateOf(false)
 
+    // The message under the finger, the message whose links show, the message
+    // to forward, and the message that the composer answers.
+    var chosen by mutableStateOf<Line?>(null)
+    var linksOf by mutableStateOf<Line?>(null)
+    var forwarding by mutableStateOf<Line?>(null)
+    var answered by mutableStateOf<Line?>(null)
+
+    // The message that a jump from an answer shows for a moment.
+    var flashed by mutableStateOf<List<Byte>?>(null)
+
+    // The message whose text the composer changes, and the text that the
+    // composer held before the edit. That text comes back at the end of the
+    // edit (Part 7 §7.5.3).
+    var edited by mutableStateOf<Line?>(null)
+    var heldDraft by mutableStateOf<CharArray?>(null)
+
+    // The text of each send and each edit that has no result yet. One that
+    // fails puts its text back into an empty composer, thus the user loses
+    // no text.
+    val unsent = UnsentText()
+
+    // The message that the user wants to delete.
+    var deleting by mutableStateOf<Line?>(null)
+    // DEV-127: each of the two deletions has a confirmation of its own.
+    var deletingOwn by mutableStateOf<Line?>(null)
+    var deletingAll by mutableStateOf<Line?>(null)
+
+    // Part 11 §11.9.6: the role of this member, the epochs of the moderators,
+    // a remove that waits for its second confirmation, and each hidden
+    // message that the user opened.
+    var ownRole by mutableStateOf<FfiRole?>(null)
+    // The name of each member, for the bubbles of a group. A contact that
+    // left keeps its name on its earlier messages.
+    var activeNames by mutableStateOf(emptyMap<UShort, String>())
+    var formerNames by mutableStateOf(emptyMap<UShort, String>())
+    val memberNames get() = formerNames + activeNames
+    // The index of this member: a roster note about it says "You".
+    var ownIndex by mutableStateOf<UShort?>(null)
+    var modNotes by mutableStateOf(emptyList<FfiModNote>())
+    var rosterNotes by mutableStateOf(emptyList<FfiRosterNote>())
+    var removing by mutableStateOf<Line?>(null)
+    val revealed = mutableStateListOf<List<Byte>>()
+
+    // Part 4 §4.5.1: a new key of the contact waits for the answer.
+    var keyChange by mutableStateOf<FfiKeyChange?>(null)
+    // IMP-082: the records to a full queue stay queued, and the chat says why.
+    var isQueueFull by mutableStateOf(false)
+
+    // Part 3 `NET-355`: a request for a new connection waits for the answer.
+    var asksRenewal by mutableStateOf(false)
+
+    // GRP-425: a group where this member is an observer takes no forward.
+    var forwardGroups by mutableStateOf(emptySet<Conversation>())
+
+    var notice by mutableStateOf<String?>(null)
+    // The sheet of the plus: a photo, a video, or a file.
+    var isAttaching by mutableStateOf(false)
+
+    // A voice message under way. The view discards a recording when it closes.
+    var recording by mutableStateOf<VoiceRecording?>(null)
+
+    // GRP-425: each member rejects a post of an observer.
+    fun isObserver(chat: Chat): Boolean = chat.isGroup && ownRole == FfiRole.OBSERVER
+
+    // GRP-338: the device that owns the channels makes each moderation epoch.
+    fun mayModerate(chat: Chat): Boolean =
+        chat.isGroup && !chat.isClosed && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR && Core.ownsChannels
+
+    // A text that the app puts into the field is no typing of the user.
+    fun putText(chars: CharArray) {
+        val typing = composer.onChange
+        composer.onChange = null
+        composer.set(chars)
+        composer.onChange = typing
+    }
+
+    fun putBackDraft() {
+        heldDraft?.let { draft ->
+            putText(draft)
+            draft.fill('\u0000')
+        }
+        heldDraft = null
+    }
+
+    fun endEdit() {
+        if (edited != null) {
+            composer.clear()
+            edited = null
+            putBackDraft()
+        }
+    }
+}
+
+/** Loads the messages, and puts the list at its place after each load. */
+@Composable
+private fun ChatListEffects(
+    conversation: Conversation,
+    state: ChatState,
+    lines: List<Line>,
+    listState: LazyListState,
+    onLoaded: (List<Line>) -> Unit,
+) {
     LaunchedEffect(conversation, Core.revision) {
         Core.load(conversation) { loaded ->
-            if (!isPlaced) {
+            if (!state.isPlaced) {
                 // The line sits above the oldest of the received messages
                 // that the user did not see.
-                newFrom = loaded.filter { !it.info.outgoing }
-                    .takeLast(unseenAtOpen)
+                state.newFrom = loaded.filter { !it.info.outgoing }
+                    .takeLast(state.unseenAtOpen)
                     .firstOrNull()
                     ?.info?.storedAtMs
             } else {
-                followsEnd = jumpsAtNextLoad || !listState.canScrollForward
-                jumpsAtNextLoad = false
+                state.followsEnd = state.jumpsAtNextLoad || !listState.canScrollForward
+                state.jumpsAtNextLoad = false
             }
-            lines = loaded
+            onLoaded(loaded)
         }
 
-        // The user looks at the conversation, thus each message is seen.
-        Core.markRead(conversation)
+        // The user looks at the conversation, thus each message is seen. A
+        // view behind another app shows nothing, and a read receipt from it
+        // would tell the contact a read that did not occur.
+        if (Core.isOnScreen()) Core.markRead(conversation)
     }
 
     LaunchedEffect(lines) {
@@ -154,12 +345,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         // offset above each height means the end of the list.
         val toEnd = suspend { listState.scrollToItem(lines.lastIndex + 1, END_OF_LIST) }
 
-        if (!isPlaced) {
-            isPlaced = true
+        if (!state.isPlaced) {
+            state.isPlaced = true
             // A visit that starts with new messages starts at the line.
-            val firstNew = lines.indexOfFirst { it.info.storedAtMs == newFrom && !it.info.outgoing }
+            val firstNew = lines.indexOfFirst { it.info.storedAtMs == state.newFrom && !it.info.outgoing }
             if (firstNew >= 0) listState.scrollToItem(firstNew) else toEnd()
-        } else if (followsEnd) {
+        } else if (state.followsEnd) {
             toEnd()
         }
     }
@@ -175,50 +366,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             if (lost > 0) listState.scrollBy(lost.toFloat())
         }
     }
+}
 
-    val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
-    val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
-    val composer = rememberPlatformField()
-
-    // Part 6 §6.6.9: the text of the field starts and ends a typing state.
-    LaunchedEffect(conversation) {
-        composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
-    }
-
-    // A text that the app puts into the field is no typing of the user.
-    val putText: (CharArray) -> Unit = { chars ->
-        val typing = composer.onChange
-        composer.onChange = null
-        composer.set(chars)
-        composer.onChange = typing
-    }
-
-    // The message under the finger, the message whose links show, the message
-    // to forward, and the message that the composer answers.
-    var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
-    var linksOf by remember(conversation) { mutableStateOf<Line?>(null) }
-    var forwarding by remember(conversation) { mutableStateOf<Line?>(null) }
-    var answered by remember(conversation) { mutableStateOf<Line?>(null) }
-
-    // The message that a jump from an answer shows for a moment.
-    var flashed by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
-    val scope = rememberCoroutineScope()
-    val jumpTo = { target: List<Byte> ->
-        val at = lines.indexOfFirst { it.key == target }
-
-        if (at >= 0) {
-            scope.launch {
-                // The first item of the list is the chip of the view.
-                listState.animateScrollToItem(at + 1)
-                flashed = target
-                delay(900)
-                flashed = null
-            }
-        }
-    }
-
-    // A result of a search opens the conversation at its message. The view
-    // puts itself at its end first, thus the jump waits for one frame.
+// A result of a search opens the conversation at its message. The view
+// puts itself at its end first, thus the jump waits for one frame.
+@Composable
+private fun ChatTargetJump(
+    conversation: Conversation,
+    target: List<Byte>?,
+    lines: List<Line>,
+    listState: LazyListState,
+    state: ChatState,
+) {
     var isAtTarget by remember(conversation, target) { mutableStateOf(false) }
     LaunchedEffect(target, lines.isNotEmpty()) {
         if (target == null || isAtTarget || lines.isEmpty()) return@LaunchedEffect
@@ -229,132 +388,69 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         isAtTarget = true
         androidx.compose.runtime.withFrameNanos { }
         listState.scrollToItem(at + 1)
-        flashed = target
+        state.flashed = target
         delay(1_500)
-        flashed = null
+        state.flashed = null
     }
+}
 
-    val context = LocalContext.current
+/** Reads each status of the conversation from the core, at each revision. */
+@Composable
+private fun ChatStatusEffects(chat: Chat, state: ChatState) {
+    val conversation = chat.conversation
 
-    // The message whose text the composer changes, and the text that the
-    // composer held before the edit. That text comes back at the end of the
-    // edit (Part 7 §7.5.3).
-    var edited by remember(conversation) { mutableStateOf<Line?>(null) }
-    var heldDraft by remember(conversation) { mutableStateOf<CharArray?>(null) }
-    val putBackDraft: () -> Unit = {
-        heldDraft?.let { draft ->
-            putText(draft)
-            draft.fill('\u0000')
-        }
-        heldDraft = null
-    }
-    val endEdit: () -> Unit = {
-        if (edited != null) {
-            composer.clear()
-            edited = null
-            putBackDraft()
-        }
-    }
-
-    // The text of each send and each edit that has no result yet. One that
-    // fails puts its text back into an empty composer, thus the user loses
-    // no text.
-    val unsent = remember(conversation) { UnsentText() }
-    DisposableEffect(conversation) { onDispose { unsent.wipe() } }
-
-    // The message that the user wants to delete.
-    var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
-    // DEV-127: each of the two deletions has a confirmation of its own.
-    var deletingOwn by remember(conversation) { mutableStateOf<Line?>(null) }
-    var deletingAll by remember(conversation) { mutableStateOf<Line?>(null) }
-
-    // Part 11 §11.9.6: the role of this member, the epochs of the moderators,
-    // a remove that waits for its second confirmation, and each hidden
-    // message that the user opened.
-    var ownRole by remember(conversation) { mutableStateOf<FfiRole?>(null) }
-    // The name of each member, for the bubbles of a group.
-    var memberNames by remember(conversation) { mutableStateOf(emptyMap<UShort, String>()) }
-    // The index of this member: a roster note about it says "You".
-    var ownIndex by remember(conversation) { mutableStateOf<UShort?>(null) }
-    var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
-    var rosterNotes by remember(conversation) { mutableStateOf(emptyList<FfiRosterNote>()) }
-    var removing by remember(conversation) { mutableStateOf<Line?>(null) }
-
-    // Part 4 §4.5.1: a new key of the contact waits for the answer.
-    var keyChange by remember(conversation) { mutableStateOf<FfiKeyChange?>(null) }
-    // IMP-082: the records to a full queue stay queued, and the chat says why.
-    var isQueueFull by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(conversation, Core.revision, Core.chats.size) {
-        if (!chat.isGroup) Core.queueFull(conversation) { isQueueFull = it }
+        if (!chat.isGroup) Core.queueFull(conversation) { state.isQueueFull = it }
     }
     LaunchedEffect(conversation, Core.revision) {
-        if (!chat.isGroup) Core.keyChange(conversation) { keyChange = it }
+        if (!chat.isGroup) Core.keyChange(conversation) { state.keyChange = it }
     }
 
-    // Part 3 `NET-355`: a request for a new connection waits for the answer.
-    var asksRenewal by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(conversation, Core.revision) {
-        if (!chat.isGroup) Core.renewalAsk(conversation) { asksRenewal = it }
+        if (!chat.isGroup) Core.renewalAsk(conversation) { state.asksRenewal = it }
     }
 
-    val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
         if (chat.isGroup) {
             Core.groupMembers(conversation) { members ->
-                ownRole = members.firstOrNull { it.isSelf }?.role
-                ownIndex = members.firstOrNull { it.isSelf }?.index
-                memberNames = members.associate { member ->
+                state.ownRole = members.firstOrNull { it.isSelf }?.role
+                state.ownIndex = members.firstOrNull { it.isSelf }?.index
+                state.activeNames = members.associate { member ->
                     val title = member.contact?.let { contact ->
                         Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
                     }
                     member.index to (if (member.isSelf) YOU else title ?: UiText.get(R.string.common_member_number, member.index.toInt()))
                 }
             }
-            Core.moderationNotes(conversation) { modNotes = it }
+            Core.formerMemberNames(conversation) { state.formerNames = it }
+            Core.moderationNotes(conversation) { state.modNotes = it }
         }
         // NET-103: a pairwise conversation takes the note of a delivery gap.
-        Core.rosterNotes(conversation) { rosterNotes = it }
+        Core.rosterNotes(conversation) { state.rosterNotes = it }
     }
 
-    // GRP-425: each member rejects a post of an observer.
-    val isObserver = chat.isGroup && ownRole == FfiRole.OBSERVER
-    // GRP-338: the device that owns the channels makes each moderation epoch.
-    val mayModerate = chat.isGroup && !chat.isClosed && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR && Core.ownsChannels
-
-    // GRP-425: a group where this member is an observer takes no forward.
-    var forwardGroups by remember(conversation) { mutableStateOf(emptySet<Conversation>()) }
-    LaunchedEffect(forwarding) {
-        forwardGroups = emptySet()
-        if (forwarding == null) return@LaunchedEffect
+    LaunchedEffect(state.forwarding) {
+        state.forwardGroups = emptySet()
+        if (state.forwarding == null) return@LaunchedEffect
 
         val groups = Core.chats.filter { it.isGroup && it.isMember && !it.isClosed && it.conversation != conversation }
         for (group in groups) {
             Core.groupMembers(group.conversation) { members ->
                 if (members.firstOrNull { it.isSelf }?.role != FfiRole.OBSERVER) {
-                    forwardGroups = forwardGroups + group.conversation
+                    state.forwardGroups = state.forwardGroups + group.conversation
                 }
             }
         }
     }
+}
 
-    var notice by remember(conversation) { mutableStateOf<String?>(null) }
-    val save = rememberSave()
-    // The sheet of the plus: a photo, a video, or a file.
-    var isAttaching by remember(conversation) { mutableStateOf(false) }
-
-    // A voice message under way. The view discards a recording when it closes.
-    var recording by remember(conversation) { mutableStateOf<VoiceRecording?>(null) }
+/** Ends a recording that the view cannot continue. */
+@Composable
+private fun ChatRecordingGuard(conversation: Conversation, state: ChatState) {
     DisposableEffect(conversation) {
         onDispose {
-            recording?.discard()
+            state.recording?.discard()
             VoicePlayer.stop()
-        }
-    }
-
-    val startRecording = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val made = VoiceRecording(context)
-            if (made.start()) recording = made else notice = UiText.get(R.string.chat_microphone_did_not_start)
         }
     }
 
@@ -363,23 +459,28 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val watcher = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) recording?.end()
+            if (event == Lifecycle.Event.ON_STOP) state.recording?.end()
         }
         owner.lifecycle.addObserver(watcher)
         onDispose { owner.lifecycle.removeObserver(watcher) }
     }
+}
 
-    // Part 7 §7.5.3: the draft comes back at the open, and it stays when
-    // the view closes or the app leaves the screen. An edit is no draft:
-    // the text before the edit is.
+// Part 7 §7.5.3: the draft comes back at the open, and it stays when
+// the view closes or the app leaves the screen. An edit is no draft:
+// the text before the edit is.
+@Composable
+private fun ChatDraftEffects(conversation: Conversation, state: ChatState) {
+    val owner = LocalLifecycleOwner.current
+
     LaunchedEffect(conversation) {
         Core.readDraft(conversation) { chars ->
-            putText(chars)
+            state.putText(chars)
             chars.fill('\u0000')
         }
     }
     val keepDraft: () -> Unit = {
-        val draft = if (edited == null) composer.copy() else heldDraft?.copyOf() ?: CharArray(0)
+        val draft = if (state.edited == null) state.composer.copy() else state.heldDraft?.copyOf() ?: CharArray(0)
         Core.keepDraft(conversation, draft)
     }
     DisposableEffect(owner, conversation) {
@@ -390,49 +491,97 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         onDispose {
             owner.lifecycle.removeObserver(keeper)
             keepDraft()
-            heldDraft?.fill('\u0000')
-            heldDraft = null
+            state.heldDraft?.fill('\u0000')
+            state.heldDraft = null
+        }
+    }
+}
+
+/** The start of a voice message. It asks for the microphone when necessary. */
+@Composable
+private fun rememberVoiceStart(state: ChatState): () -> Unit {
+    val context = LocalContext.current
+
+    val startRecording = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val made = VoiceRecording(context)
+            if (made.start()) state.recording = made else state.notice = UiText.get(R.string.chat_microphone_did_not_start)
         }
     }
 
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (allowed) startRecording() else notice = UiText.get(R.string.chat_no_microphone_access)
+        if (allowed) startRecording() else state.notice = UiText.get(R.string.chat_no_microphone_access)
     }
 
+    return {
+        val permission = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+        if (permission == PackageManager.PERMISSION_GRANTED) {
+            startRecording()
+        } else {
+            askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+}
+
+@Composable
+private fun ChatNoticeEffects(state: ChatState) {
     // A send that did not start says why in this view.
     LaunchedEffect(Core.fault) {
         Core.fault?.let {
-            notice = it
+            state.notice = it
             Core.fault = null
         }
     }
-    LaunchedEffect(notice) {
-        if (notice != null) {
+    LaunchedEffect(state.notice) {
+        if (state.notice != null) {
             delay(4_000)
-            notice = null
+            state.notice = null
         }
     }
+}
 
-    forwarding?.let { line ->
+/** Each sheet of the view, in the sequence of its layers. */
+@Composable
+private fun ChatSheets(chat: Chat, state: ChatState, save: (Line) -> Unit) {
+    ForwardSheet(chat.conversation, state)
+    LinksSheet(state)
+    MessageSheet(chat, state, save)
+    PendingSendSheet(chat.conversation)
+    RemoveSheet(state)
+    DeleteSheet(state)
+    DeleteOwnSheet(state)
+    DeleteAllSheet(chat, state)
+}
+
+@Composable
+private fun ForwardSheet(conversation: Conversation, state: ChatState) {
+    state.forwarding?.let { line ->
         val targets = Core.chats.filter {
             !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember &&
-                (!it.isGroup || it.conversation in forwardGroups)
+                (!it.isGroup || it.conversation in state.forwardGroups)
         }
 
         ActionSheet(
             stringResource(R.string.chat_forward_to),
             targets.map { target ->
                 RowEntry(if (target.isGroup) "user-group" else "comment", target.title) {
-                    Core.forward(line.handle, target.conversation) { notice = UiText.get(R.string.chat_forwarded_to, target.title) }
+                    Core.forward(line.handle, target.conversation) {
+                        state.notice = UiText.get(R.string.chat_forwarded_to, target.title)
+                    }
                 }
             },
             // A sheet with a title and no row says why it is empty.
             note = if (targets.isEmpty()) stringResource(R.string.chat_no_forward_target) else null,
-            onDismiss = { forwarding = null },
+            onDismiss = { state.forwarding = null },
         )
     }
+}
 
-    linksOf?.let { line ->
+@Composable
+private fun LinksSheet(state: ChatState) {
+    val context = LocalContext.current
+
+    state.linksOf?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_links),
             Links.of(line.text).map { url ->
@@ -440,11 +589,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     Links.open(context, url)
                 }
             },
-            onDismiss = { linksOf = null },
+            onDismiss = { state.linksOf = null },
         )
     }
+}
 
-    chosen?.let { line ->
+/** The actions of the message under the finger. */
+@Composable
+private fun MessageSheet(chat: Chat, state: ChatState, save: (Line) -> Unit) {
+    state.chosen?.let { line ->
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
             listOf(
@@ -452,94 +605,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     Core.deleteForMe(line.handle)
                 },
             )
-        } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
-            // A hidden message that the user did not open gives no content.
-            buildList {
-                if (mayModerate) {
-                    add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
-                    add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
-                }
-                add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { deleting = line })
-            }
+        } else if (line.info.moderation == MOD_HIDE && line.key !in state.revealed) {
+            hiddenMessageEntries(line, chat, state)
         } else {
-            buildList {
-                // IMP-075: a failed text goes again at the action of the user.
-                if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null && !isObserver) {
-                    add(
-                        RowEntry("rotate", stringResource(R.string.chat_send_again), tag = TestTags.MESSAGE_SEND_AGAIN) {
-                            Core.sendAgain(line.handle)
-                        },
-                    )
-                }
-                add(
-                    RowEntry("reply", stringResource(R.string.common_reply), tag = TestTags.MESSAGE_REPLY) {
-                        endEdit()
-                        answered = line
-                    },
-                )
-                // The core says whether the text can change: a text of this
-                // device, inside 24 hours, below the limit of revisions.
-                if (line.info.editable && !isObserver) {
-                    add(
-                        RowEntry("pen", stringResource(R.string.common_edit), tag = TestTags.MESSAGE_EDIT) {
-                            answered = null
-                            // A second edit keeps the draft of the first one.
-                            if (edited == null) heldDraft = composer.copy().takeIf { it.isNotEmpty() }
-                            edited = line
-                            // IMP-017: the field copies the text, and zeros
-                            // overwrite this copy.
-                            val copy = line.text.copyOf()
-                            putText(copy)
-                            copy.fill('\u0000')
-                        },
-                    )
-                }
-
-                val file = line.info.file
-                if (file == null) {
-                    add(
-                        RowEntry("copy", stringResource(R.string.chat_copy_text), tag = TestTags.MESSAGE_COPY) {
-                            copyMessage(context, line.text)
-                        },
-                    )
-                    // WIR-177: a text goes to another chat as a forward.
-                    // DEV-322: the sender of the message can prohibit it.
-                    if (line.poll == null && !line.info.noForward) {
-                        add(
-                            RowEntry("share-nodes", stringResource(R.string.chat_forward), tag = TestTags.MESSAGE_FORWARD) {
-                                forwarding = line
-                            },
-                        )
-                    }
-                } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
-                    // IMP-045: the user saves one file.
-                    add(RowEntry("download", stringResource(R.string.chat_save_to_device)) { save(line) })
-                }
-                // ATT-054: the sender sends a file again as a new upload.
-                if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY && !isObserver) {
-                    add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.resendFile(line.handle) })
-                }
-
-                // GRP-085: a hide is the first act of a moderator, and a
-                // remove asks again (GRP-086). A closed group takes no act
-                // (GRP-434).
-                if (mayModerate) {
-                    if (line.info.moderation == MOD_HIDE) {
-                        add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
-                    } else {
-                        add(
-                            RowEntry(
-                                "eye",
-                                stringResource(R.string.chat_hide_for_everyone),
-                                stringResource(R.string.chat_hide_for_everyone_detail),
-                            ) { Core.moderate(line.handle, MOD_HIDE) },
-                        )
-                    }
-                    add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
-                }
-
-                add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { deleting = line })
-            }
+            openMessageEntries(line, chat, state, save)
         }
 
         ActionSheet(
@@ -553,16 +622,117 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 {
                     QuickReactions(line.reactions) { emoji ->
                         Core.react(line.handle, emoji)
-                        chosen = null
+                        state.chosen = null
                     }
                 }
             },
-            onDismiss = { chosen = null },
+            onDismiss = { state.chosen = null },
         )
     }
+}
 
-    // ATT-083, ATT-084: a large file names its cost, and the user can drop
-    // it. ATT-157: an original says that it keeps its metadata.
+// A hidden message that the user did not open gives no content.
+@Composable
+private fun hiddenMessageEntries(line: Line, chat: Chat, state: ChatState): List<RowEntry> = buildList {
+    if (state.mayModerate(chat)) {
+        add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
+        add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { state.removing = line })
+    }
+    add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { state.deleting = line })
+}
+
+/** The actions of a message that shows its content. */
+@Composable
+private fun openMessageEntries(line: Line, chat: Chat, state: ChatState, save: (Line) -> Unit): List<RowEntry> {
+    val context = LocalContext.current
+    val isObserver = state.isObserver(chat)
+
+    return buildList {
+        // IMP-075: a failed text goes again at the action of the user.
+        if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null && !isObserver) {
+            add(
+                RowEntry("rotate", stringResource(R.string.chat_send_again), tag = TestTags.MESSAGE_SEND_AGAIN) {
+                    Core.sendAgain(line.handle)
+                },
+            )
+        }
+        add(
+            RowEntry("reply", stringResource(R.string.common_reply), tag = TestTags.MESSAGE_REPLY) {
+                state.endEdit()
+                state.answered = line
+            },
+        )
+        // The core says whether the text can change: a text of this
+        // device, inside 24 hours, below the limit of revisions.
+        if (line.info.editable && !isObserver) {
+            add(
+                RowEntry("pen", stringResource(R.string.common_edit), tag = TestTags.MESSAGE_EDIT) {
+                    state.answered = null
+                    // A second edit keeps the draft of the first one.
+                    if (state.edited == null) state.heldDraft = state.composer.copy().takeIf { it.isNotEmpty() }
+                    state.edited = line
+                    // IMP-017: the field copies the text, and zeros
+                    // overwrite this copy.
+                    val copy = line.text.copyOf()
+                    state.putText(copy)
+                    copy.fill('\u0000')
+                },
+            )
+        }
+
+        val file = line.info.file
+        if (file == null) {
+            add(
+                RowEntry("copy", stringResource(R.string.chat_copy_text), tag = TestTags.MESSAGE_COPY) {
+                    copyMessage(context, line.text)
+                },
+            )
+            // WIR-177: a text goes to another chat as a forward.
+            // DEV-322: the sender of the message can prohibit it.
+            if (line.poll == null && !line.info.noForward) {
+                add(
+                    RowEntry("share-nodes", stringResource(R.string.chat_forward), tag = TestTags.MESSAGE_FORWARD) {
+                        state.forwarding = line
+                    },
+                )
+            }
+        } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
+            // IMP-045: the user saves one file.
+            add(RowEntry("download", stringResource(R.string.chat_save_to_device)) { save(line) })
+        }
+        // ATT-054: the sender sends a file again as a new upload.
+        if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY && !isObserver) {
+            add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.resendFile(line.handle) })
+        }
+
+        // GRP-085: a hide is the first act of a moderator, and a
+        // remove asks again (GRP-086). A closed group takes no act
+        // (GRP-434).
+        if (state.mayModerate(chat)) {
+            if (line.info.moderation == MOD_HIDE) {
+                add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
+            } else {
+                add(
+                    RowEntry(
+                        "eye",
+                        stringResource(R.string.chat_hide_for_everyone),
+                        stringResource(R.string.chat_hide_for_everyone_detail),
+                    ) { Core.moderate(line.handle, MOD_HIDE) },
+                )
+            }
+            add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { state.removing = line })
+        }
+
+        add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { state.deleting = line })
+    }
+}
+
+// ATT-083, ATT-084: a large file names its cost, and the user can drop
+// it. ATT-157: an original says that it keeps its metadata.
+@Composable
+private fun PendingSendSheet(conversation: Conversation) {
+    val context = LocalContext.current
+
     Core.pendingSend?.takeIf { it.conversation == conversation }?.let { pending ->
         val notes = buildList {
             if (pending.bytes > LARGE_FILE_WARN) {
@@ -587,18 +757,24 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { Core.cancelSend() },
         )
     }
+}
 
-    removing?.let { line ->
+@Composable
+private fun RemoveSheet(state: ChatState) {
+    state.removing?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_remove_this_message_question),
             listOf(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { Core.moderate(line.handle, MOD_REMOVE) }),
             // GRP-087: a remove is not reversible, and the sheet says so.
             note = UiText.get(R.string.umbra_ui_grp_087),
-            onDismiss = { removing = null },
+            onDismiss = { state.removing = null },
         )
     }
+}
 
-    deleting?.let { line ->
+@Composable
+private fun DeleteSheet(state: ChatState) {
+    state.deleting?.let { line ->
         // DEV-127, DEV-128: two labels, and neither looks the safer one.
         val entries = buildList {
             add(
@@ -606,7 +782,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     "trash-can",
                     stringResource(R.string.common_delete_on_my_devices),
                     tag = TestTags.MESSAGE_DELETE_FOR_ME,
-                ) { deletingOwn = line },
+                ) { state.deletingOwn = line },
             )
             // A contact takes a deletion for a message of this device alone.
             if (line.info.outgoing) {
@@ -615,15 +791,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         "trash-can",
                         stringResource(R.string.chat_delete_for_everyone),
                         tag = TestTags.MESSAGE_DELETE_FOR_EVERYONE,
-                    ) { deletingAll = line },
+                    ) { state.deletingAll = line },
                 )
             }
         }
 
-        ActionSheet(stringResource(R.string.chat_delete_this_message_question), entries, onDismiss = { deleting = null })
+        ActionSheet(stringResource(R.string.chat_delete_this_message_question), entries, onDismiss = { state.deleting = null })
     }
+}
 
-    deletingOwn?.let { line ->
+@Composable
+private fun DeleteOwnSheet(state: ChatState) {
+    state.deletingOwn?.let { line ->
         ActionSheet(
             stringResource(R.string.common_delete_on_my_devices_question),
             listOf(
@@ -634,15 +813,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 ) {
                     Core.deleteForMe(line.handle)
                     // DEV-129: the view says which deletion ran.
-                    notice = UiText.get(R.string.common_deleted_on_your_devices)
+                    state.notice = UiText.get(R.string.common_deleted_on_your_devices)
                 },
             ),
             note = stringResource(R.string.chat_delete_on_my_devices_note),
-            onDismiss = { deletingOwn = null },
+            onDismiss = { state.deletingOwn = null },
         )
     }
+}
 
-    deletingAll?.let { line ->
+@Composable
+private fun DeleteAllSheet(chat: Chat, state: ChatState) {
+    state.deletingAll?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_delete_for_everyone_question),
             listOf(
@@ -651,7 +833,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     stringResource(R.string.chat_delete_for_everyone),
                     tag = TestTags.MESSAGE_DELETE_CONFIRM,
                 ) {
-                    if (answered?.key == line.key) answered = null
+                    if (state.answered?.key == line.key) state.answered = null
                     // DEV-129: the view says which deletion ran, after the
                     // core took the request.
                     val asked = if (chat.isGroup) {
@@ -659,8 +841,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     } else {
                         UiText.get(R.string.chat_asked_contact_to_delete, chat.title)
                     }
-                    Core.deleteForEveryone(line.handle, onAsked = { notice = asked }) {
-                        notice = UiText.get(R.string.chat_wait_between_deletions)
+                    Core.deleteForEveryone(line.handle, onAsked = { state.notice = asked }) {
+                        state.notice = UiText.get(R.string.chat_wait_between_deletions)
                     }
                 },
             ),
@@ -674,520 +856,579 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     UiText.get(R.string.umbra_ui_dev_126)
                 }
             ) + if (line.info.file != null) "\n\n" + UiText.get(R.string.umbra_ui_dev_126_file) else "",
-            onDismiss = { deletingAll = null },
+            onDismiss = { state.deletingAll = null },
         )
     }
+}
 
-    Column(Modifier.fillMaxSize()) {
-        // The name leads to the details of the contact, and that view holds
-        // each action of a conversation. The search sits beside it.
-        BackBar(
-            chat.title,
-            subtitle = when {
-                threadOf != null -> stringResource(R.string.chat_thread)
-                chat.isGroup -> groupSubtitle(chat)
-                conversation.id.toList() in Core.typingNow -> stringResource(R.string.chat_typing)
-                else -> null
-            },
-            onBack = { if (threadOf != null) threadOf = null else onBack() },
-            isVerified = chat.isVerified,
-            leading = { Avatar(chat, size = 36) },
-            onTitle = {
-                push(
-                    if (chat.isGroup) {
-                        Screen.GroupDetails(chat.conversation)
-                    } else {
-                        Screen.ContactDetails(chat.conversation)
-                    },
-                )
-            },
-            actions = {
-                IconAction("magnifying-glass", stringResource(R.string.common_search), tag = TestTags.CHAT_SEARCH) {
-                    push(Screen.Search(chat.conversation))
-                }
-            },
-        )
-        BlockedLine(chat)
-
-        // GRP-199, GRP-200: the line ends at the first answer of a relay.
-        if (chat.isUnreachable) {
-            Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
-                Note(UiText.get(R.string.umbra_ui_grp_199))
-            }
-        }
-
-        if (isQueueFull) {
-            Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
-                Note(UiText.get(R.string.umbra_ui_imp_082))
-            }
-        }
-
-        // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
-        val notes = remember(modNotes, rosterNotes, memberNames, ownIndex) {
-            chatNotes(modNotes, rosterNotes, memberNames, self = ownIndex)
-        }
-
-        // Part 11 §11.9.6: a hidden message shows no text until the user
-        // opens it, and the quote of a reply to it shows none either.
-        val hiddenKeys = remember(lines) { lines.filter { it.info.moderation == MOD_HIDE }.map { it.key }.toSet() }
-        val isStillHidden = { key: List<Byte> -> key in hiddenKeys && key !in revealed }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp).tagged(TestTags.CHAT_LIST),
-        ) {
-            item {
-                // One line, and no more: the top of a conversation is for
-                // its messages.
-                Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
-                    Row(
-                        Modifier
-                            .background(Palette.Incoming, CircleShape)
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        FaIcon("lock", size = 10.dp, tint = Palette.TextSecondary)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            stringResource(R.string.chat_end_to_end_encrypted),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Palette.TextSecondary,
-                        )
-                    }
-                }
-            }
-
-            // GRP-050: a chat that shows no message shows each note also,
-            // as the join of a member of a new group. The notes below sit
-            // beside a line, thus they need one.
-            val thread = threadOf
-            val showsNoLine = lines.none { thread == null || it.key == thread || it.threadKey == thread }
-            if (showsNoLine) {
-                items(notes) { note -> TaggedNote(note) }
-            }
-
-            // The key keeps the state of a bubble, as its slide, with its message.
-            itemsIndexed(lines, key = { _, line -> line.key }) { index, line ->
-                // A thread shows its root and its replies alone.
-                if (threadOf != null && line.key != threadOf && line.threadKey != threadOf) return@itemsIndexed
-
-                val before = lines.getOrNull(index - 1)
-                if (before == null || !isSameDay(before.info.clockAtMs, line.info.clockAtMs)) {
-                    DayLabel(line.info.clockAtMs.toLong())
-                }
-                if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
-
-                // GRP-089: each moderation epoch shows at its time.
-                if (index == 0) {
-                    for (note in notes.filter { it.atMs < line.info.storedAtMs }) TaggedNote(note)
-                }
-
-                // DEV-207: a timer change is a row of the conversation.
-                if (line.info.timer != null) {
-                    TimerLine(line, chat)
-                } else if (line.info.forwardPolicy != null) {
-                    // DEV-324: a policy change is a row of the conversation.
-                    ForwardLine(line, chat)
-                } else if (line.info.cleared) {
-                    ClearedLine(chat)
-                } else Bubble(
-                    line,
-                    chat,
-                    isFlashed = flashed == line.key,
-                    // A press opens a photo that is there, and it starts a
-                    // transfer that failed again. A press on an answer leads to
-                    // the message that it answers.
-                    onQuote = when {
-                        line.info.deleted -> null
-                        // A tap opens a hidden message on this device alone.
-                        line.info.moderation == MOD_HIDE && line.key !in revealed -> ({ revealed.add(line.key) })
-                        // IMP-167: a tap fetches a file that waits above the
-                        // limit, and a file that failed.
-                        // ATT-050: an expired file has nothing to fetch.
-                        isExpired(line) -> null
-                        line.info.file?.state?.toInt() == FILE_FAILED ||
-                            line.info.file?.state?.toInt() == FILE_HELD -> ({ Core.fetchFile(line.handle) })
-                        line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
-                            CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
-                            CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })
-                            CLASS_VOICE, CLASS_AUDIO -> ({ VoicePlayer.toggle(line) })
-                            else -> ({ save(line) })
-                        }
-                        // NET-146: a tap shows the links of the message.
-                        Links.ranges(line.text).isNotEmpty() -> ({ linksOf = line })
-                        else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
-                    },
-                    onLongPress = { chosen = line },
-                    // A placeholder has no content to answer, and a hidden
-                    // message that the user did not open gives none.
-                    onReply = if (line.info.deleted || isStillHidden(line.key)) null else ({ answered = line }),
-                    isRevealed = line.key in revealed,
-                    isQuoteHidden = line.quote?.let { isStillHidden(it.key) } == true,
-                    mayVote = !isObserver,
-                    // A group names the sender of a run of its messages.
-                    author = line.info.sender?.takeIf {
-                        chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
-                    }?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) },
-                    // A quote in a group names the member who wrote it.
-                    quoteAuthor = line.quote?.let { quote ->
-                        when {
-                            quote.isOutgoing -> stringResource(R.string.common_you)
-                            chat.isGroup -> quote.sender?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) }
-                            else -> chat.title
-                        }
-                    },
-                )
-
-                // WIR-273: a root names its replies, and a tap opens them.
-                val replies = replyCounts[line.key] ?: 0
-                if (replies > 0 && threadOf == null) {
-                    Text(
-                        pluralStringResource(R.plurals.chat_replies, replies, replies),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Palette.Action,
-                        modifier = Modifier
-                            .padding(start = 12.dp, bottom = 4.dp)
-                            .minimumInteractiveComponentSize()
-                            .press(role = Role.Button) { threadOf = line.key },
-                    )
-                }
-
-                // The contact saw each message up to this one. The mark
-                // sits under it and under no other, as a read marker does.
-                if (index == readUpTo) ReadMark(chat)
-
-                val next = lines.getOrNull(index + 1)
-                for (note in notes) {
-                    if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
-                        TaggedNote(note)
-                    }
-                }
-            }
-        }
-
-        notice?.let {
-            Box(Modifier.padding(horizontal = PressInset)) { Note(it, tag = TestTags.CHAT_NOTICE) }
-        }
-
-        // DEV-126: the limits of an edit show while the user edits. They go
-        // at the confirmation and at the cancel, and they wait for no relay.
-        if (edited != null) {
-            Box(Modifier.padding(horizontal = PressInset)) {
-                Note(
-                    UiText.get(
-                        if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
-                    ),
-                )
-            }
-        }
-
-        // An answer and an edit start with the keyboard open, as a user
-        // expects it.
-        LaunchedEffect(answered, edited) { if (answered != null || edited != null) composer.focus() }
-
-        // WIR-535: the text of the composer goes with a file as its
-        // caption. A caption above CAPTION_MAX stays in the composer, and
-        // the file does not go.
-        val takeCaption = takeCaption@{
-            val chars = composer.take() ?: CharArray(0)
-
-            if (utf8Length(chars) > CAPTION_MAX) {
-                composer.set(chars)
-                chars.fill('\u0000')
-                notice = UiText.get(R.string.chat_caption_too_long)
-                return@takeCaption null
-            }
-
-            chars
-        }
-
-        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
-            if (picked != null) {
-                Core.sendPhoto(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
-                jumpsAtNextLoad = true
-            }
-        }
-        val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
-            if (picked != null) {
-                Core.sendVideo(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
-                jumpsAtNextLoad = true
-            }
-        }
-        val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
-            if (picked != null) {
-                Core.sendAudio(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
-                jumpsAtNextLoad = true
-            }
-        }
-        val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
-            if (picked != null) {
-                Core.sendDocument(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
-                jumpsAtNextLoad = true
-            }
-        }
-
-        if (isAttaching) {
-            // The pickers of the platform give this app the picked item alone,
-            // and no access to the gallery or to the files.
-            val entries = buildList {
-                add(
-                    RowEntry("image", stringResource(R.string.common_photo), tag = TestTags.ATTACH_PHOTO) {
-                        Core.awaitsResult()
-                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    },
-                )
-                if (Files.canSendVideo) {
-                    add(
-                        RowEntry("film", stringResource(R.string.common_video), tag = TestTags.ATTACH_VIDEO) {
-                            Core.awaitsResult()
-                            videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                        },
-                    )
-                    add(RowEntry("music", stringResource(R.string.chat_audio), tag = TestTags.ATTACH_AUDIO) {
-                        Core.awaitsResult()
-                        audioPicker.launch(arrayOf("audio/*"))
-                    })
-                }
-                add(RowEntry("file", stringResource(R.string.common_file), tag = TestTags.ATTACH_FILE) {
-                    Core.awaitsResult()
-                    filePicker.launch(arrayOf("*/*"))
-                })
-                // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
-                if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
-                    add(
-                        RowEntry("chart-bar", stringResource(R.string.chat_poll), tag = TestTags.ATTACH_POLL) {
-                            push(Screen.NewPoll(conversation))
-                        },
-                    )
-                }
-            }
-
-            ActionSheet(stringResource(R.string.common_attach), entries, onDismiss = { isAttaching = false })
-        }
-
-        // GRP-210: a group whose two relays hold it no more takes no new
-        // message, and the composer would promise one. A group that
-        // removed this device takes none either.
-        val stopped = when {
-            // GRP-297: the keys of the group moved on while this device was
-            // away, and no member could give them to it.
-            chat.isLapsed ->
-                stringResource(R.string.common_group_lapsed_note)
-            chat.isClosed -> stringResource(R.string.common_group_closed_note)
-            // GRP-373, GRP-374: a removed device took the index of this member.
-            chat.isReturning ->
-                stringResource(R.string.common_group_returning_note)
-            chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
-            chat.isGroup && !chat.isMember ->
-                stringResource(R.string.chat_no_longer_member)
-            // An observer reads the group and posts nothing to it.
-            chat.isGroup && ownRole == FfiRole.OBSERVER -> stringResource(R.string.chat_role_observer)
+@Composable
+private fun ChatTopBar(chat: Chat, state: ChatState, onBack: () -> Unit, push: (Screen) -> Unit) {
+    // The name leads to the details of the contact, and that view holds
+    // each action of a conversation. The search sits beside it.
+    BackBar(
+        chat.title,
+        subtitle = when {
+            state.threadOf != null -> stringResource(R.string.chat_thread)
+            chat.isGroup -> groupSubtitle(chat)
+            chat.conversation.id.toList() in Core.typingNow -> stringResource(R.string.chat_typing)
             else -> null
-        }
-
-        if (stopped != null) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
-                Note(stopped, tag = TestTags.CHAT_STOPPED)
+        },
+        onBack = { if (state.threadOf != null) state.threadOf = null else onBack() },
+        isVerified = chat.isVerified,
+        leading = { Avatar(chat, size = 36) },
+        onTitle = {
+            push(
+                if (chat.isGroup) {
+                    Screen.GroupDetails(chat.conversation)
+                } else {
+                    Screen.ContactDetails(chat.conversation)
+                },
+            )
+        },
+        actions = {
+            IconAction("magnifying-glass", stringResource(R.string.common_search), tag = TestTags.CHAT_SEARCH) {
+                push(Screen.Search(chat.conversation))
             }
-            return@Column
+        },
+    )
+}
+
+/** The lines under the top bar that say why a message does not arrive. */
+@Composable
+private fun ChatBanners(chat: Chat, isQueueFull: Boolean) {
+    // GRP-199, GRP-200: the line ends at the first answer of a relay.
+    if (chat.isUnreachable) {
+        Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
+            Note(UiText.get(R.string.umbra_ui_grp_199))
+        }
+    }
+
+    if (isQueueFull) {
+        Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
+            Note(UiText.get(R.string.umbra_ui_imp_082))
+        }
+    }
+}
+
+@Composable
+private fun MessageList(
+    modifier: Modifier,
+    chat: Chat,
+    state: ChatState,
+    lines: List<Line>,
+    listState: LazyListState,
+    save: (Line) -> Unit,
+    push: (Screen) -> Unit,
+    jumpTo: (List<Byte>) -> Unit,
+) {
+    val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
+    val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
+    val memberNames = state.memberNames
+    val revealed = state.revealed
+
+    // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
+    val notes = remember(state.modNotes, state.rosterNotes, memberNames, state.ownIndex) {
+        chatNotes(state.modNotes, state.rosterNotes, memberNames, self = state.ownIndex)
+    }
+
+    // Part 11 §11.9.6: a hidden message shows no text until the user
+    // opens it, and the quote of a reply to it shows none either.
+    val hiddenKeys = remember(lines) { lines.filter { it.info.moderation == MOD_HIDE }.map { it.key }.toSet() }
+    val isStillHidden = { key: List<Byte> -> key in hiddenKeys && key !in revealed }
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp).tagged(TestTags.CHAT_LIST),
+    ) {
+        item { EncryptedChip() }
+
+        // GRP-050: a chat that shows no message shows each note also,
+        // as the join of a member of a new group. The notes below sit
+        // beside a line, thus they need one.
+        val thread = state.threadOf
+        val showsNoLine = lines.none { thread == null || it.key == thread || it.threadKey == thread }
+        if (showsNoLine) {
+            items(notes) { note -> TaggedNote(note) }
         }
 
-        // IDN-025: a key change blocks the conversation until the answer.
-        keyChange?.let { pending ->
-            KeyChangePanel(chat, pending) { push(Screen.Verify(conversation)) }
-            return@Column
-        }
+        // The key keeps the state of a bubble, as its slide, with its message.
+        itemsIndexed(lines, key = { _, line -> line.key }) { index, line ->
+            // A thread shows its root and its replies alone.
+            if (state.threadOf != null && line.key != state.threadOf && line.threadKey != state.threadOf) return@itemsIndexed
 
-        // NET-355: the question blocks nothing, and the composer stays.
-        if (asksRenewal) RenewalPanel(chat)
+            val before = lines.getOrNull(index - 1)
+            if (before == null || !isSameDay(before.info.clockAtMs, line.info.clockAtMs)) {
+                DayLabel(line.info.clockAtMs.toLong())
+            }
+            if (!line.info.outgoing && line.info.storedAtMs == state.newFrom) NewLabel()
 
-        // The encode of a long audio file takes time, and the user can end
-        // it.
-        if (Core.audioEncoding == conversation) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.weight(1f)) { WorkingRow(stringResource(R.string.chat_audio_prepares)) }
-                InlineButton(stringResource(R.string.chat_stop_audio), tag = TestTags.CHAT_AUDIO_STOP) {
-                    Core.stopAudio()
+            // GRP-089: each moderation epoch shows at its time.
+            if (index == 0) {
+                for (note in notes.filter { it.atMs < line.info.storedAtMs }) TaggedNote(note)
+            }
+
+            // DEV-207: a timer change is a row of the conversation.
+            if (line.info.timer != null) {
+                TimerLine(line, chat)
+            } else if (line.info.forwardPolicy != null) {
+                // DEV-324: a policy change is a row of the conversation.
+                ForwardLine(line, chat)
+            } else if (line.info.cleared) {
+                ClearedLine(chat)
+            } else Bubble(
+                line,
+                chat,
+                isFlashed = state.flashed == line.key,
+                // A press opens a photo that is there, and it starts a
+                // transfer that failed again. A press on an answer leads to
+                // the message that it answers.
+                onQuote = tapAction(line, chat.conversation, state, save, push, jumpTo),
+                onLongPress = { state.chosen = line },
+                // A placeholder has no content to answer, and a hidden
+                // message that the user did not open gives none.
+                onReply = if (line.info.deleted || isStillHidden(line.key)) null else ({ state.answered = line }),
+                isRevealed = line.key in revealed,
+                isQuoteHidden = line.quote?.let { isStillHidden(it.key) } == true,
+                mayVote = !state.isObserver(chat),
+                // A group names the sender of a run of its messages.
+                author = line.info.sender?.takeIf {
+                    chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
+                }?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) },
+                // A quote in a group names the member who wrote it.
+                quoteAuthor = line.quote?.let { quote ->
+                    when {
+                        quote.isOutgoing -> stringResource(R.string.common_you)
+                        chat.isGroup -> quote.sender?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) }
+                        else -> chat.title
+                    }
+                },
+            )
+
+            // WIR-273: a root names its replies, and a tap opens them.
+            val replies = replyCounts[line.key] ?: 0
+            if (replies > 0 && state.threadOf == null) {
+                RepliesLink(replies) { state.threadOf = line.key }
+            }
+
+            // The contact saw each message up to this one. The mark
+            // sits under it and under no other, as a read marker does.
+            if (index == readUpTo) ReadMark(chat)
+
+            val next = lines.getOrNull(index + 1)
+            for (note in notes) {
+                if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
+                    TaggedNote(note)
                 }
             }
         }
+    }
+}
 
+@Composable
+private fun EncryptedChip() {
+    // One line, and no more: the top of a conversation is for
+    // its messages.
+    Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            // The send button stays beside the line of the text.
-            verticalAlignment = Alignment.Bottom,
+            Modifier
+                .background(Palette.Incoming, CircleShape)
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // The answer is a part of the composer: the box of the field
-            // grows upward and holds the name at its top.
-            Column(Modifier.weight(1f).background(Palette.Incoming, RoundedCornerShape(24.dp))) {
-                AnimatedVisibility(
-                    visible = answered != null || edited != null,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut(),
-                ) {
-                    // The words stay for the time of the exit.
-                    val header = remember { mutableStateOf("reply" to "") }
-                    val quoted = remember { mutableStateOf(CharArray(0)) }
+            FaIcon("lock", size = 10.dp, tint = Palette.TextSecondary)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                stringResource(R.string.chat_end_to_end_encrypted),
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.TextSecondary,
+            )
+        }
+    }
+}
 
-                    // A reply in a group names the member who wrote the message.
-                    answered?.let {
-                        header.value = "reply" to when {
-                            it.info.outgoing -> stringResource(R.string.common_you)
-                            chat.isGroup -> it.info.sender?.let { sender -> memberNames[sender] ?: stringResource(R.string.common_member_number, sender.toInt()) } ?: chat.title
-                            else -> chat.title
-                        }
-                        quoted.value = quoteWords(it)
-                    }
-                    if (edited != null) {
-                        header.value = "pen" to stringResource(R.string.chat_edit_message)
-                        quoted.value = CharArray(0)
-                    }
+/** What a tap on the bubble of [line] does, or null for no action. */
+private fun tapAction(
+    line: Line,
+    conversation: Conversation,
+    state: ChatState,
+    save: (Line) -> Unit,
+    push: (Screen) -> Unit,
+    jumpTo: (List<Byte>) -> Unit,
+): (() -> Unit)? = when {
+    line.info.deleted -> null
+    // A tap opens a hidden message on this device alone.
+    line.info.moderation == MOD_HIDE && line.key !in state.revealed -> ({ state.revealed.add(line.key) })
+    // IMP-167: a tap fetches a file that waits above the
+    // limit, and a file that failed.
+    // ATT-050: an expired file has nothing to fetch.
+    isExpired(line) -> null
+    line.info.file?.state?.toInt() == FILE_FAILED ||
+        line.info.file?.state?.toInt() == FILE_HELD -> ({ Core.fetchFile(line.handle) })
+    line.info.file?.state?.toInt() == FILE_READY -> when (line.info.file?.mimeClass) {
+        CLASS_IMAGE -> ({ push(Screen.Photo(conversation, line)) })
+        CLASS_VIDEO -> ({ push(Screen.Video(conversation, line)) })
+        CLASS_VOICE, CLASS_AUDIO -> ({ VoicePlayer.toggle(line) })
+        else -> ({ save(line) })
+    }
+    // NET-146: a tap shows the links of the message.
+    Links.ranges(line.text).isNotEmpty() -> ({ state.linksOf = line })
+    else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
+}
 
-                    ComposerHeader(header.value.first, header.value.second, quoted.value) {
-                        endEdit()
-                        answered = null
-                    }
-                }
+@Composable
+private fun RepliesLink(replies: Int, onOpen: () -> Unit) {
+    Text(
+        pluralStringResource(R.plurals.chat_replies, replies, replies),
+        style = MaterialTheme.typography.labelMedium,
+        color = Palette.Action,
+        modifier = Modifier
+            .padding(start = 12.dp, bottom = 4.dp)
+            .minimumInteractiveComponentSize()
+            .press(role = Role.Button, onClick = onOpen),
+    )
+}
 
-                val active = recording
-                if (active != null) {
-                    RecordingBar(
-                        active,
-                        onDiscard = {
-                            active.discard()
-                            recording = null
-                        },
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    )
-                } else Row(verticalAlignment = Alignment.Bottom) {
-                    // The plus sits inside the box, and it opens
-                    // the sheet of a photo, a video, and a file.
-                    Box(
-                        Modifier
-                            .padding(start = 4.dp)
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .tagged(TestTags.CHAT_ATTACH)
-                            .press(role = Role.Button, label = stringResource(R.string.common_attach)) { isAttaching = true },
-                        contentAlignment = Alignment.Center,
-                    ) { FaIcon("plus", label = stringResource(R.string.common_attach), size = 18.dp, tint = Palette.TextSecondary) }
+/** The lines between the list and the composer. */
+@Composable
+private fun ChatNotices(chat: Chat, state: ChatState) {
+    state.notice?.let {
+        Box(Modifier.padding(horizontal = PressInset)) { Note(it, tag = TestTags.CHAT_NOTICE) }
+    }
 
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .padding(start = 2.dp, end = 18.dp, top = 12.dp, bottom = 12.dp),
-                        contentAlignment = Alignment.CenterStart,
-                    ) {
-                        // With no network the record waits in the store.
-                        PlatformInput(
-                            composer,
-                            hint = stringResource(R.string.common_message),
-                            isPassphrase = false,
-                            modifier = Modifier.fillMaxWidth().tagged(TestTags.CHAT_INPUT),
-                            maxLines = 5,
-                        )
-                    }
-                }
+    // DEV-126: the limits of an edit show while the user edits. They go
+    // at the confirmation and at the cancel, and they wait for no relay.
+    if (state.edited != null) {
+        Box(Modifier.padding(horizontal = PressInset)) {
+            Note(
+                UiText.get(
+                    if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
+                ),
+            )
+        }
+    }
+}
+
+/** The sheet of the plus, and the pickers that it starts. */
+@Composable
+private fun AttachSheet(chat: Chat, state: ChatState, push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    val conversation = chat.conversation
+    val composer = state.composer
+
+    // WIR-535: the text of the composer goes with a file as its
+    // caption. A caption above CAPTION_MAX stays in the composer, and
+    // the file does not go.
+    val takeCaption = takeCaption@{
+        val chars = composer.take() ?: CharArray(0)
+
+        if (utf8Length(chars) > CAPTION_MAX) {
+            composer.set(chars)
+            chars.fill('\u0000')
+            state.notice = UiText.get(R.string.chat_caption_too_long)
+            return@takeCaption null
+        }
+
+        chars
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
+        if (picked != null) {
+            Core.sendPhoto(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
+            state.jumpsAtNextLoad = true
+        }
+    }
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
+        if (picked != null) {
+            Core.sendVideo(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
+            state.jumpsAtNextLoad = true
+        }
+    }
+    val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
+        if (picked != null) {
+            Core.sendAudio(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
+            state.jumpsAtNextLoad = true
+        }
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
+        if (picked != null) {
+            Core.sendDocument(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
+            state.jumpsAtNextLoad = true
+        }
+    }
+
+    if (state.isAttaching) {
+        // The pickers of the platform give this app the picked item alone,
+        // and no access to the gallery or to the files.
+        val entries = buildList {
+            add(
+                RowEntry("image", stringResource(R.string.common_photo), tag = TestTags.ATTACH_PHOTO) {
+                    Core.awaitsResult()
+                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+            )
+            if (Files.canSendVideo) {
+                add(
+                    RowEntry("film", stringResource(R.string.common_video), tag = TestTags.ATTACH_VIDEO) {
+                        Core.awaitsResult()
+                        videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    },
+                )
+                add(RowEntry("music", stringResource(R.string.chat_audio), tag = TestTags.ATTACH_AUDIO) {
+                    Core.awaitsResult()
+                    audioPicker.launch(arrayOf("audio/*"))
+                })
             }
+            add(RowEntry("file", stringResource(R.string.common_file), tag = TestTags.ATTACH_FILE) {
+                Core.awaitsResult()
+                filePicker.launch(arrayOf("*/*"))
+            })
+            // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
+            if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
+                add(
+                    RowEntry("chart-bar", stringResource(R.string.chat_poll), tag = TestTags.ATTACH_POLL) {
+                        push(Screen.NewPoll(conversation))
+                    },
+                )
+            }
+        }
 
-            Spacer(Modifier.width(8.dp))
+        ActionSheet(stringResource(R.string.common_attach), entries, onDismiss = { state.isAttaching = false })
+    }
+}
 
-            // An empty composer records a voice message in the place of a
-            // send. An answer and an edit take a text.
-            val offersVoice = recording == null && composer.isEmpty && answered == null && edited == null &&
-                Files.canSendVideo
-            val sendLabel = stringResource(if (offersVoice) R.string.chat_record_voice_message else R.string.common_send)
+// GRP-210: a group whose two relays hold it no more takes no new
+// message, and the composer would promise one. A group that
+// removed this device takes none either.
+@Composable
+private fun stoppedNote(chat: Chat, ownRole: FfiRole?): String? = when {
+    // DEV-181: a removed device that owns no channel reaches no contact.
+    Core.removedFromSet && !Core.ownsChannels -> stringResource(R.string.main_removed_from_set)
+    // GRP-297: the keys of the group moved on while this device was
+    // away, and no member could give them to it.
+    chat.isLapsed ->
+        stringResource(R.string.common_group_lapsed_note)
+    chat.isClosed -> stringResource(R.string.common_group_closed_note)
+    // GRP-373, GRP-374: a removed device took the index of this member.
+    chat.isReturning ->
+        stringResource(R.string.common_group_returning_note)
+    chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
+    chat.isGroup && !chat.isMember ->
+        stringResource(R.string.chat_no_longer_member)
+    // An observer reads the group and posts nothing to it.
+    chat.isGroup && ownRole == FfiRole.OBSERVER -> stringResource(R.string.chat_role_observer)
+    else -> null
+}
+
+@Composable
+private fun AudioEncodingRow(conversation: Conversation) {
+    // The encode of a long audio file takes time, and the user can end
+    // it.
+    if (Core.audioEncoding == conversation) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.weight(1f)) { WorkingRow(stringResource(R.string.chat_audio_prepares)) }
+            InlineButton(stringResource(R.string.chat_stop_audio), tag = TestTags.CHAT_AUDIO_STOP) {
+                Core.stopAudio()
+            }
+        }
+    }
+}
+
+/** The input row: the box of the field, and the send button. */
+@Composable
+private fun Composer(chat: Chat, state: ChatState, onRecord: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        // The send button stays beside the line of the text.
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        ComposerBox(Modifier.weight(1f), chat, state)
+
+        Spacer(Modifier.width(8.dp))
+
+        SendButton(chat.conversation, state, onRecord)
+    }
+}
+
+@Composable
+private fun ComposerBox(modifier: Modifier, chat: Chat, state: ChatState) {
+    // The answer is a part of the composer: the box of the field
+    // grows upward and holds the name at its top.
+    Column(modifier.background(Palette.Incoming, RoundedCornerShape(24.dp))) {
+        ComposerHeaderSlot(chat, state)
+
+        val active = state.recording
+        if (active != null) {
+            RecordingBar(
+                active,
+                onDiscard = {
+                    active.discard()
+                    state.recording = null
+                },
+                modifier = Modifier.heightIn(min = 48.dp),
+            )
+        } else Row(verticalAlignment = Alignment.Bottom) {
+            // The plus sits inside the box, and it opens
+            // the sheet of a photo, a video, and a file.
+            Box(
+                Modifier
+                    .padding(start = 4.dp)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .tagged(TestTags.CHAT_ATTACH)
+                    .press(role = Role.Button, label = stringResource(R.string.common_attach)) { state.isAttaching = true },
+                contentAlignment = Alignment.Center,
+            ) { FaIcon("plus", label = stringResource(R.string.common_attach), size = 18.dp, tint = Palette.TextSecondary) }
 
             Box(
                 Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(Palette.Action)
-                    .tagged(TestTags.CHAT_SEND)
-                    .press(role = Role.Button, label = sendLabel) {
-                        val active = recording
-                        if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            recording = null
-                            Core.sendVoice(conversation, active)
-                            jumpsAtNextLoad = true
-                            return@press
-                        }
-
-                        if (offersVoice) {
-                            val state = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-                            if (state == PackageManager.PERMISSION_GRANTED) {
-                                startRecording()
-                            } else {
-                                askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                            return@press
-                        }
-
-                        composer.take()?.let { text ->
-                            // The core wipes `text`, thus the view keeps a
-                            // copy until the core tells the result. A text
-                            // that the user typed after the send stays.
-                            val copy = unsent.hold(text)
-                            val target = edited
-                            val answers = answered
-                            if (target != null) {
-                                Core.edit(
-                                    conversation,
-                                    target.handle,
-                                    text,
-                                    onFailed = {
-                                        unsent.end(copy) { kept ->
-                                            // The edit starts again, and a
-                                            // text that the user typed
-                                            // after it waits as a draft.
-                                            if (edited == null) {
-                                                heldDraft = composer.copy().takeIf { it.isNotEmpty() }
-                                                edited = target
-                                                putText(kept)
-                                            }
-                                        }
-                                    },
-                                    onSent = { unsent.end(copy) },
-                                )
-                            } else {
-                                Core.send(
-                                    conversation,
-                                    text,
-                                    answers?.handle,
-                                    onFailed = {
-                                        unsent.end(copy) { kept ->
-                                            if (composer.isEmpty && edited == null) {
-                                                putText(kept)
-                                                answered = answers
-                                            }
-                                        }
-                                    },
-                                    onSent = { unsent.end(copy) },
-                                )
-                                jumpsAtNextLoad = true
-                            }
-
-                            answered = null
-                            edited = null
-                            putBackDraft()
-                        }
-                    },
-                contentAlignment = Alignment.Center,
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .padding(start = 2.dp, end = 18.dp, top = 12.dp, bottom = 12.dp),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                // An edit ends with a check, and a message with the plane.
-                val icon = when {
-                    edited != null -> "check"
-                    offersVoice -> "microphone"
-                    else -> "paper-plane"
-                }
-
-                FaIcon(icon, label = sendLabel, size = 18.dp, tint = Palette.OnAction)
+                // With no network the record waits in the store.
+                PlatformInput(
+                    state.composer,
+                    hint = stringResource(R.string.common_message),
+                    isPassphrase = false,
+                    modifier = Modifier.fillMaxWidth().tagged(TestTags.CHAT_INPUT),
+                    maxLines = 5,
+                )
             }
         }
     }
+}
+
+/** The header of an answer or an edit, at the top of the box of the field. */
+@Composable
+private fun ColumnScope.ComposerHeaderSlot(chat: Chat, state: ChatState) {
+    AnimatedVisibility(
+        visible = state.answered != null || state.edited != null,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut(),
+    ) {
+        // The words stay for the time of the exit.
+        val header = remember { mutableStateOf("reply" to "") }
+        val quoted = remember { mutableStateOf(CharArray(0)) }
+
+        // A reply in a group names the member who wrote the message.
+        state.answered?.let {
+            header.value = "reply" to when {
+                it.info.outgoing -> stringResource(R.string.common_you)
+                chat.isGroup -> it.info.sender?.let { sender -> state.memberNames[sender] ?: stringResource(R.string.common_member_number, sender.toInt()) } ?: chat.title
+                else -> chat.title
+            }
+            quoted.value = quoteWords(it)
+        }
+        if (state.edited != null) {
+            header.value = "pen" to stringResource(R.string.chat_edit_message)
+            quoted.value = CharArray(0)
+        }
+
+        ComposerHeader(header.value.first, header.value.second, quoted.value) {
+            state.endEdit()
+            state.answered = null
+        }
+    }
+}
+
+@Composable
+private fun SendButton(conversation: Conversation, state: ChatState, onRecord: () -> Unit) {
+    val composer = state.composer
+
+    // An empty composer records a voice message in the place of a
+    // send. An answer and an edit take a text.
+    val offersVoice = state.recording == null && composer.isEmpty && state.answered == null && state.edited == null &&
+        Files.canSendVideo
+    val sendLabel = stringResource(if (offersVoice) R.string.chat_record_voice_message else R.string.common_send)
+
+    Box(
+        Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(Palette.Action)
+            .tagged(TestTags.CHAT_SEND)
+            .press(role = Role.Button, label = sendLabel) {
+                val active = state.recording
+                if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    state.recording = null
+                    Core.sendVoice(conversation, active)
+                    state.jumpsAtNextLoad = true
+                    return@press
+                }
+
+                if (offersVoice) {
+                    onRecord()
+                    return@press
+                }
+
+                composer.take()?.let { text -> sendText(conversation, state, text) }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        // An edit ends with a check, and a message with the plane.
+        val icon = when {
+            state.edited != null -> "check"
+            offersVoice -> "microphone"
+            else -> "paper-plane"
+        }
+
+        FaIcon(icon, label = sendLabel, size = 18.dp, tint = Palette.OnAction)
+    }
+}
+
+/** Sends [text] as a new message, or as the new text of the edited message. */
+private fun sendText(conversation: Conversation, state: ChatState, text: CharArray) {
+    val composer = state.composer
+
+    // The core wipes `text`, thus the view keeps a
+    // copy until the core tells the result. A text
+    // that the user typed after the send stays.
+    val copy = state.unsent.hold(text)
+    val target = state.edited
+    val answers = state.answered
+    if (target != null) {
+        Core.edit(
+            conversation,
+            target.handle,
+            text,
+            onFailed = {
+                state.unsent.end(copy) { kept ->
+                    // The edit starts again, and a
+                    // text that the user typed
+                    // after it waits as a draft.
+                    if (state.edited == null) {
+                        state.heldDraft = composer.copy().takeIf { it.isNotEmpty() }
+                        state.edited = target
+                        state.putText(kept)
+                    }
+                }
+            },
+            onSent = { state.unsent.end(copy) },
+        )
+    } else {
+        Core.send(
+            conversation,
+            text,
+            answers?.handle,
+            onFailed = {
+                state.unsent.end(copy) { kept ->
+                    if (composer.isEmpty && state.edited == null) {
+                        state.putText(kept)
+                        state.answered = answers
+                    }
+                }
+            },
+            onSent = { state.unsent.end(copy) },
+        )
+        state.jumpsAtNextLoad = true
+    }
+
+    state.answered = null
+    state.edited = null
+    state.putBackDraft()
 }
 
 /** A note of the conversation, with the name that a test finds it by. */

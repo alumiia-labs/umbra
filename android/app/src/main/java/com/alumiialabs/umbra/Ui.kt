@@ -154,6 +154,12 @@ private fun OpenApp() {
     // The keyboard of one view has no field in the next one.
     HideKeyboardOn(stack.lastOrNull())
 
+    // DEV-181: a removal that comes while the store is open locks it.
+    val lockContext = LocalContext.current
+    LaunchedEffect(Core.locksForRemoval) {
+        if (Core.locksForRemoval) Core.lock(lockContext)
+    }
+
     // A tapped or shared invitation link opens the view of the link above
     // the open views. Another app can send one, and Back leads to the view
     // that the user left.

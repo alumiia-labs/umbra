@@ -1196,6 +1196,708 @@ async fn open_again(
     Ok(link)
 }
 
+/// The state of one run of [`run_client`] that the steps of its loop share.
+/// The link, the command channel, and each timer of the `select!` stay in
+/// `run_client`.
+struct Run {
+    node: ClientNode,
+    rng: OsRng,
+    updates: mpsc::UnboundedSender<Update>,
+    persist: Box<dyn Persist>,
+    shown_chains: Vec<[[u8; 32]; 3]>,
+    shown_queues: Vec<([u8; 32], [u8; 32])>,
+    notify_tags: BTreeMap<u64, u64>,
+    rendezvous_tags: BTreeMap<u64, u64>,
+    report_handles: BTreeSet<u64>,
+    tags: Tags,
+    resends: Resends,
+    device_invites: BTreeSet<u64>,
+    ended_invites: BTreeSet<u64>,
+    is_foreground: bool,
+    next_rotation_check: tokio::time::Instant,
+    carried: Option<(CoverSlot, tokio::time::Instant)>,
+    last_faults: LinkFaults,
+    clock_seen: Option<(i64, bool)>,
+    circuit_clock: CircuitClock,
+}
+
+impl Run {
+    /// Tells the client the index of each record that left, and each hole
+    /// in the records of a contact.
+    fn report_sends(&mut self) {
+        // WIR-254, WIR-339: the indices of the records of the user, and the
+        // holes of the records of the contacts.
+        for (handle, index) in self.node.take_send_indices() {
+            if let Some(tag) = self.tags.get(&handle) {
+                // NET-219: a seal is one send of the record, and the wait
+                // for its answer starts.
+                self.resends.left(*tag, unix_now());
+                let _ = self.updates.send(Update::SendIndex { tag: *tag, index });
+            }
+        }
+        for (contact, index) in self.node.take_lost() {
+            let _ = self.updates.send(Update::Lost { contact, index });
+        }
+    }
+
+    /// Uses one slot of the cover clock: a record of the user goes again,
+    /// or the slot carries a receipt, a digest, or cover.
+    fn on_slot(&mut self, now: u64) {
+        // NET-071, NET-065: a record of the user goes again in a
+        // slot: one that a relay refused with `BUSY` or
+        // `ADMISSION`, one whose send took no answer, and one whose
+        // wait after a `LIMIT` ended. Its first retransmission comes
+        // before each other item. A later one comes after an
+        // acknowledgment alone, thus before a receipt, a link-fault
+        // report, and a digest.
+        self.resends.unanswered(now);
+        let mut stopped = Vec::new();
+        let resend = self.resends.next(now, &mut stopped);
+        for tag in stopped {
+            self.tags.forget(tag);
+            let _ = self.updates.send(Update::Failed(tag));
+        }
+
+        match resend {
+            Some((tag, is_first)) => self.resend_in_slot(tag, is_first, now),
+            None => self.cover_in_slot(now),
+        }
+        for contact in self.node.take_gaps() {
+            let _ = self.updates.send(Update::DeliveryGap(contact));
+        }
+    }
+
+    /// Sends one record of the user again in a slot.
+    fn resend_in_slot(&mut self, tag: u64, is_first: bool, now: u64) {
+        let is_free = is_first || matches!(self.node.on_ack_slot(now, &mut self.rng), Ok(false));
+        if !is_free {
+            return;
+        }
+
+        if let Some((contact, app)) = self.resends.take(tag) {
+            match self.node.send(&contact, app, now, &mut self.rng) {
+                Ok(handle) => {
+                    self.tags.insert(handle, tag);
+                }
+                Err(_) => {
+                    self.resends.ended(tag);
+                    self.tags.forget(tag);
+                    let _ = self.updates.send(Update::Unsent(tag));
+                }
+            }
+        }
+    }
+
+    /// Gives a slot with no record of the user to a receipt, a digest, or
+    /// cover.
+    fn cover_in_slot(&mut self, now: u64) {
+        // IMP-146: a batch whose record took no answer in
+        // `CARRIED_WAIT` waits for none, and a slot carries the
+        // batch of the store again.
+        if self
+            .carried
+            .is_some_and(|(_, until)| tokio::time::Instant::now() >= until)
+        {
+            self.carried = None;
+        }
+
+        let receipt = if self.carried.is_none() {
+            self.persist.due_receipt(now)
+        } else {
+            None
+        };
+
+        // NET-065: a digest only where no receipt waits.
+        let asks_digest = self.carried.is_none() && receipt.is_none();
+        let digest = if asks_digest {
+            self.persist.due_digest(now)
+        } else {
+            None
+        };
+        let given = receipt
+            .as_ref()
+            .map(|(contact, app)| (contact, app.as_slice()));
+        let offered = digest
+            .as_ref()
+            .map(|(contact, app)| (contact, app.as_slice()));
+        if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
+            self.node
+                .on_cover_slot(self.is_foreground, given, offered, now, &mut self.rng)
+        {
+            self.carried = Some((slot, deadline_after(CARRIED_WAIT)));
+        }
+    }
+
+    /// Does the work of one tick: the clock check, the builds and the
+    /// rotations that are due, and the counts of the link.
+    fn on_tick(&mut self, now: u64) -> Vec<ClientEvent> {
+        // SCP-019: a step of the device clock of more than
+        // CLOCK_SKEW against the monotonic source interrupts each
+        // duration that runs.
+        let offset = clock_offset(now);
+        if self
+            .clock_seen
+            .is_some_and(|seen| clock_stepped(seen, offset))
+        {
+            self.node.clock_moved(now);
+            let _ = self.updates.send(Update::ClockMoved);
+        }
+        self.clock_seen = Some(offset);
+        if let Some(step) = self.circuit_clock.moved(offset) {
+            self.node.circuit_clock_moved(step);
+        }
+        *CLOCK_SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(offset);
+
+        self.node.set_challenge_clock(now);
+        let mut events = self.node.on_tick(now);
+
+        // DIS-015: the rendezvous circuits start on their own delay.
+        let _ = self.node.start_rendezvous_due(now, &mut self.rng);
+
+        // NET-347: a record that waits takes a new build after one
+        // that ran out of time.
+        let _ = self.node.rebuild_lost(now, &mut self.rng);
+
+        // NET-320, NET-321: a circuit near a margin takes a spare,
+        // and the run goes on.
+        let _ = self.node.replace_aging(now, &mut self.rng);
+
+        // A `SUB` that a relay refused with `LIMIT` or `BUSY` goes
+        // again at the end of its wait.
+        let _ = self.node.subscribe_due(now, &mut self.rng);
+
+        // NET-176: a fault of one rotation ends no run, and the
+        // next check tries again.
+        if self.node.is_ready() && tokio::time::Instant::now() >= self.next_rotation_check {
+            self.next_rotation_check = deadline_after(Duration::from_secs(60));
+            events.extend(self.node.rotate_due(now, &mut self.rng).unwrap_or_default());
+            let _ = self.updates.send(Update::Tick);
+        }
+
+        // The view of the connection reads the counts while the run
+        // holds them.
+        if self.node.faults() != &self.last_faults {
+            self.last_faults = self.node.faults().clone();
+            let _ = self
+                .updates
+                .send(Update::Faults(Box::new(self.last_faults.clone())));
+        }
+        events
+    }
+
+    /// Sends again each `NEW` that a relay refused for its admission, and
+    /// adds the events of the sends. A run that pauses sends none.
+    fn admit_queues(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+        is_pausing: bool,
+    ) -> Result<(), Ended> {
+        let asked: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::AdmissionAsked { handle } => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        for handle in asked {
+            if is_pausing {
+                break;
+            }
+
+            let token = self.persist.admission_token(unix_now());
+            match self
+                .node
+                .admit_queue(handle, token.as_deref(), &mut self.rng)
+            {
+                Ok(more) => events.extend(more),
+                Err(_) => return Err(Ended::NodeFault),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Gives the update of one event of the node, or none for an event that
+    /// the client does not hear of. `ending` takes the cause of an event
+    /// that ends the run.
+    fn update_of(
+        &mut self,
+        event: ClientEvent,
+        made: &[(u64, [u8; 32])],
+        stores_hellos: bool,
+        is_pausing: bool,
+        ending: &mut Option<Ended>,
+    ) -> Option<Update> {
+        let update = match event {
+            ClientEvent::CircuitReady => Update::Online,
+            ClientEvent::Invitation { handle, bundle } => {
+                return self.invitation_update(handle, bundle, made);
+            }
+            ClientEvent::InvitationLink { fragment, .. } => Update::Invitation(fragment),
+            ClientEvent::InvitationGone { .. } => Update::InvitationGone,
+            ClientEvent::ContactReady {
+                contact,
+                peer_static,
+                is_device,
+            } => Update::Contact {
+                contact,
+                peer_static,
+                is_device,
+            },
+            ClientEvent::Message { contact, mut app } => {
+                // IMP-126: the store took the record in `settle`.
+                app.zeroize();
+                Update::Message { contact }
+            }
+            ClientEvent::VerificationCode { contact, code } => {
+                Update::VerificationCode { contact, code }
+            }
+            // IDN-170: the code that the view shows verifies no more.
+            ClientEvent::VerificationEnded { contact } => Update::VerificationRefused(contact),
+            ClientEvent::Accepted { handle } => {
+                let tag = self.tags.remove(&handle)?;
+                self.resends.ended(tag);
+                // An answer to an earlier send of this record
+                // names no record of the run any more.
+                self.tags.forget(tag);
+                Update::Sent(tag)
+            }
+            ClientEvent::Room { handle, remaining } => {
+                let tag = self.tags.get(&handle)?;
+                Update::Room {
+                    tag: *tag,
+                    remaining,
+                }
+            }
+            ClientEvent::Rejected { handle, reason } => {
+                return self.rejected_update(handle, reason);
+            }
+            // The node of the queues sends no chunk command and no
+            // group-queue command, thus it gets no such answer. The
+            // transfer of Part 12 has a node and a connection of its
+            // own (§12.8), and a group queue takes a session that
+            // carries no other range (`GRP-186`).
+            ClientEvent::Chunk { .. }
+            | ClientEvent::Group { .. }
+            | ClientEvent::GroupRecord { .. } => return None,
+            ClientEvent::NotifyQueue {
+                handle,
+                recipient_id,
+                address,
+            } => {
+                let tag = self.notify_tags.remove(&handle)?;
+                Update::NotifyQueue {
+                    tag,
+                    recipient_id,
+                    address,
+                }
+            }
+            ClientEvent::Digest { id, .. } => Update::Digest { group_queue_id: id },
+            ClientEvent::RendezvousQueue {
+                handle,
+                recipient_id,
+                address,
+            } => {
+                let tag = self.rendezvous_tags.remove(&handle)?;
+                Update::RendezvousQueue {
+                    tag,
+                    recipient_id,
+                    address,
+                }
+            }
+            // WIR-115: the store took the hello with its queue cursor.
+            ClientEvent::Hello { .. } if stores_hellos => return None,
+            ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
+            ClientEvent::ReportQueue {
+                handle, address, ..
+            } => {
+                self.report_handles.remove(&handle);
+                Update::ReportQueue { address }
+            }
+            ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
+            // The contact follows flight 1 of the addressee.
+            ClientEvent::HelloSent { .. } | ClientEvent::AdmissionAsked { .. } => return None,
+            ClientEvent::NotifyKey {
+                recipient_id,
+                relay_ntf_pk,
+            } => Update::NotifyKey {
+                recipient_id,
+                relay_ntf_pk,
+            },
+            ClientEvent::NotifierId {
+                recipient_id,
+                notifier_id,
+            } => Update::NotifierId {
+                recipient_id,
+                notifier_id,
+            },
+            // A watch runs in a node of its own (`NTF-142`).
+            ClientEvent::Wake { .. } => return None,
+            ClientEvent::QueueEnded { queue } => Update::QueueEnded(queue),
+            ClientEvent::ChannelDead { contact } => Update::ChannelDead(contact),
+            ClientEvent::QueueRotated { contact, address } => Update::QueueRotated {
+                contact,
+                address: Zeroizing::new(address),
+            },
+            ClientEvent::PeerMoved { contact } => Update::PeerMoved(contact),
+            ClientEvent::CandidateSent { contact } => Update::CandidateSent(contact),
+            // IMP-146, NET-054: a relay answered the record of the
+            // batch, and the store erases it. An answer that names no
+            // batch of this run, as one that came past `CARRIED_WAIT`,
+            // erases nothing.
+            ClientEvent::Carried { slot } => {
+                if self.carried.is_some_and(|(held, _)| held == slot) {
+                    self.carried = None;
+                    match slot {
+                        CoverSlot::Receipt => self.persist.receipt_sent(),
+                        CoverSlot::Digest => self.persist.digest_sent(),
+                        _ => {}
+                    }
+                }
+                return None;
+            }
+            ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
+            // NET-355: the store holds the bundle that waits, in the
+            // batch of this call, and the client reads the question
+            // from there.
+            ClientEvent::RenewalAsked { .. } | ClientEvent::RenewalAskEnded { .. } => return None,
+            // A run that pauses reads on to the `SessionPaused`.
+            ClientEvent::CircuitLost | ClientEvent::CircuitAged if is_pausing => return None,
+            // A circuit that still builds or serves keeps the run. The
+            // node builds its last circuit again at once, and
+            // `rebuild_lost` builds each other one at a tick. Thus one
+            // relay that ends one circuit ends no run.
+            ClientEvent::CircuitLost if self.node.has_circuit() => return None,
+            ClientEvent::CircuitLost => {
+                ending.get_or_insert(Ended::CircuitLost);
+                return None;
+            }
+            ClientEvent::CircuitAged => {
+                ending.get_or_insert(Ended::Aged);
+                return None;
+            }
+        };
+
+        Some(update)
+    }
+
+    /// Gives the update of an invitation that a relay made, or ends an
+    /// invitation whose link ended first.
+    fn invitation_update(
+        &mut self,
+        handle: u64,
+        bundle: Vec<u8>,
+        made: &[(u64, [u8; 32])],
+    ) -> Option<Update> {
+        let queue = made
+            .iter()
+            .find(|(held, _)| *held == handle)
+            .map(|(_, queue)| *queue);
+        if self.ended_invites.remove(&handle) {
+            // DEV-290: the link of this invitation ended before
+            // a relay made its queue. It ends here, and no
+            // party gets its bundle. The next call commits the
+            // change, and the `DEL` leaves at a later check.
+            if let Some(queue) = queue {
+                let _ = self.node.end_invitation(&queue, &mut self.rng);
+            }
+            return None;
+        }
+
+        if self.device_invites.remove(&handle) {
+            Some(Update::DeviceInvitation(bundle))
+        } else {
+            Some(Update::Invitation(bundle))
+        }
+    }
+
+    /// Gives the update of a command that a relay rejected, or none for a
+    /// record that goes again and for a handle that the run does not hold.
+    fn rejected_update(&mut self, handle: u64, reason: umbra_queue::Reject) -> Option<Update> {
+        let update = match reason {
+            // NET-218: a `LIMIT` of a full queue ends no send.
+            umbra_queue::Reject::Limit if self.tags.contains_key(&handle) => {
+                let tag = self.tags.remove(&handle)?;
+
+                // The client holds the record for the room of the
+                // queue, and it gives it to a later send (`IMP-082`).
+                self.resends.ended(tag);
+                self.tags.forget(tag);
+                Update::Held(tag)
+            }
+            // NET-218: a `BUSY` or an `ADMISSION` ends no send. The
+            // record stays queued, and a slot carries it again.
+            umbra_queue::Reject::Busy | umbra_queue::Reject::Admission
+                if self.tags.contains_key(&handle) =>
+            {
+                match self.tags.remove(&handle) {
+                    Some(tag) if self.resends.refused(tag, reason, unix_now()) => return None,
+                    // NET-219 to NET-221: the ARQ stopped, and the record
+                    // fails.
+                    Some(tag) => {
+                        self.tags.forget(tag);
+                        Update::Failed(tag)
+                    }
+                    None => return None,
+                }
+            }
+            _ => match self.tags.remove(&handle) {
+                Some(tag) => {
+                    self.resends.ended(tag);
+                    self.tags.forget(tag);
+                    Update::Failed(tag)
+                }
+                // A relay refused the `NEW` of a rendezvous queue.
+                None => match self.rendezvous_tags.remove(&handle) {
+                    Some(tag) => Update::RendezvousRefused(tag),
+                    // REL-208: the authority hears of its refused `NEW`.
+                    None if self.report_handles.remove(&handle) => {
+                        Update::ReportQueueRefused(Some(reason))
+                    }
+                    // The store holds the group as one that waits for
+                    // its notify queue, and only this update ends that.
+                    None => Update::NotifyRefused(self.notify_tags.remove(&handle)?),
+                },
+            },
+        };
+
+        Some(update)
+    }
+
+    /// Shows the circuits and the queues of the node when they changed.
+    fn show_circuits(&mut self) {
+        let chains = self.node.chains();
+        if chains != self.shown_chains {
+            self.shown_chains.clone_from(&chains);
+            let _ = self.updates.send(Update::Circuits(chains));
+        }
+
+        let queues = self.node.inbound_queues();
+        if queues != self.shown_queues {
+            self.shown_queues.clone_from(&queues);
+            let _ = self.updates.send(Update::Queues(queues));
+        }
+    }
+
+    /// Runs one command of the client on the node, which is ready.
+    fn run_command(&mut self, command: Command, now: u64) {
+        // A value of the user ends no runtime: a bad bundle and a send
+        // to no contact fail that one command.
+        match command {
+            // The loop above takes these commands.
+            Command::Foreground(_)
+            | Command::Wake
+            | Command::Challenges { .. }
+            | Command::OtherChains(_) => {}
+            Command::SetClass { contact, class } => self.node.set_contact_class(&contact, class),
+            Command::Invite => {
+                if self.node.invite_link(&mut self.rng).is_err() {
+                    let _ = self.updates.send(Update::Refused);
+                }
+            }
+            Command::InviteDevice => match self.node.invite_device(&mut self.rng) {
+                Ok(handle) => {
+                    self.device_invites.insert(handle);
+                }
+                Err(_) => {
+                    let _ = self.updates.send(Update::Refused);
+                }
+            },
+            Command::AcceptDevice(bundle) => {
+                if self.node.accept_device(bundle, &mut self.rng).is_err() {
+                    let _ = self.updates.send(Update::Refused);
+                }
+            }
+            // DEV-290: a link that ended retires its sync invitation.
+            // A queue whose handshake finished holds no half, and the
+            // call changes nothing for it.
+            Command::EndDeviceInvitation(queues) => {
+                self.ended_invites.append(&mut self.device_invites);
+                for queue in queues {
+                    let _ = self.node.end_invitation(&queue, &mut self.rng);
+                }
+            }
+            Command::Accept(given) => {
+                let accepted = if given.len() == FRAGMENT_LEN {
+                    self.node.accept_link(&given, &mut self.rng)
+                } else {
+                    self.node.accept(given, &mut self.rng)
+                };
+                if accepted.is_err() {
+                    let _ = self.updates.send(Update::Refused);
+                }
+            }
+            Command::Verify(contact) => {
+                if self
+                    .node
+                    .start_verification(&contact, now, &mut self.rng)
+                    .is_err()
+                {
+                    let _ = self.updates.send(Update::VerificationRefused(contact));
+                }
+            }
+            Command::ConfirmVerified(contact) => {
+                let update = match self.node.confirm_verification(&contact) {
+                    Ok(peer_static) => Update::Verified {
+                        contact,
+                        peer_static,
+                    },
+                    Err(_) => Update::VerificationRefused(contact),
+                };
+                let _ = self.updates.send(update);
+            }
+            Command::Send {
+                contact,
+                app,
+                tag,
+                prior,
+            } => self.send_record(contact, app, tag, prior, now),
+            // A queue that no circuit serves any more takes its binding
+            // in a later run, thus a failure here ends nothing.
+            Command::MakeNotifyQueue(tag) => match self.node.make_notify_queue(&mut self.rng) {
+                Ok(handle) => {
+                    self.notify_tags.insert(handle, tag);
+                }
+                Err(_) => {
+                    let _ = self.updates.send(Update::NotifyRefused(tag));
+                }
+            },
+            Command::EndNotifyQueue(recipient_id) => {
+                let _ = self.node.end_notify_queue(&recipient_id, &mut self.rng);
+            }
+            Command::RotateNow(contact) => {
+                let _ = self.node.rotate_now(&contact);
+            }
+            Command::RotateSwept(contact, guard) => {
+                let _ = if guard {
+                    self.node.rotate_swept(&contact, now, &mut self.rng)
+                } else {
+                    self.node.sweep_again(&contact, now, &mut self.rng)
+                };
+            }
+            Command::PeerMoved {
+                contact,
+                address,
+                dead,
+                sent,
+            } => {
+                let told =
+                    self.node
+                        .peer_candidate(&contact, &address, dead, sent, now, &mut self.rng);
+
+                // NET-191: the store learns of the one send.
+                for event in told.unwrap_or_default() {
+                    if let ClientEvent::CandidateSent { contact } = event {
+                        let _ = self.updates.send(Update::CandidateSent(contact));
+                    }
+                }
+            }
+            Command::PeerKey { contact, key } => {
+                let _ = self.node.set_peer_key(&contact, key);
+            }
+            Command::AnswerRenewal { contact, accept } => {
+                let _ = self.node.answer_renewal(&contact, accept, &mut self.rng);
+            }
+            #[cfg(feature = "sockets-test")]
+            Command::EndSweeps => {
+                self.node.end_sweeps(now);
+                self.next_rotation_check = tokio::time::Instant::now();
+            }
+            Command::NotifyQueue {
+                recipient_id,
+                notifier_pk,
+            } => {
+                let _ = self
+                    .node
+                    .notify_queue(&recipient_id, &notifier_pk, &mut self.rng);
+            }
+            Command::BindQueue {
+                recipient_id,
+                sealed,
+            } => {
+                let _ = self.node.bind_queue(&recipient_id, &sealed, &mut self.rng);
+            }
+            Command::MakeRendezvousQueue(tag) => {
+                match self.node.make_rendezvous_queue(&mut self.rng) {
+                    Ok(handle) => {
+                        self.rendezvous_tags.insert(handle, tag);
+                    }
+                    Err(_) => {
+                        let _ = self.updates.send(Update::RendezvousRefused(tag));
+                    }
+                }
+            }
+            Command::MakeReportQueue => match self.node.make_report_queue(&mut self.rng) {
+                Ok(handle) => {
+                    self.report_handles.insert(handle);
+                }
+                Err(_) => {
+                    let _ = self.updates.send(Update::ReportQueueRefused(None));
+                }
+            },
+            Command::OpenCircuit(relay) => {
+                let _ = self.node.open_circuit(relay, &mut self.rng);
+            }
+            Command::Probe => {
+                let _ = self.updates.send(match self.node.probe() {
+                    Ok((chain, tags)) => Update::Probe { chain, tags },
+                    Err(_) => Update::ProbeFailed,
+                });
+            }
+            Command::EndRendezvousQueue(recipient_id) => {
+                let _ = self.node.end_rendezvous_queue(&recipient_id, &mut self.rng);
+            }
+            Command::Hello {
+                entry_pk,
+                rendezvous,
+                profile,
+                token,
+            } => {
+                let epoch = umbra_core::abuse::epoch_number(now);
+                let _ = self.node.hello(
+                    &entry_pk,
+                    &rendezvous,
+                    &profile,
+                    epoch,
+                    token.as_deref(),
+                    &mut self.rng,
+                );
+            }
+        }
+    }
+
+    /// Holds one record of the user for the ARQ of the run, and sends it.
+    fn send_record(
+        &mut self,
+        contact: ContactId,
+        app: Zeroizing<Vec<u8>>,
+        tag: u64,
+        prior: Prior,
+        now: u64,
+    ) {
+        match self.resends.hold(tag, contact, app, prior, now) {
+            // NET-219 to NET-221: the ARQ of the record stopped
+            // in an earlier run, and the record fails.
+            None => {
+                let _ = self.updates.send(Update::Failed(tag));
+            }
+            // NET-071: the retry after a `LIMIT` takes a slot.
+            Some(_) if prior.in_slot => self.resends.wait(tag),
+            Some(app) => match self.node.send(&contact, app, now, &mut self.rng) {
+                Ok(handle) => {
+                    self.tags.insert(handle, tag);
+                }
+                Err(_) => {
+                    self.resends.ended(tag);
+                    let _ = self.updates.send(Update::Unsent(tag));
+                }
+            },
+        }
+    }
+}
+
 /// Runs one client until the connection ends or each sender of `commands`
 /// closes. A command that arrives before the circuit is ready waits. The
 /// channel has no bound, because the caller is a thread of the platform
@@ -1215,7 +1917,7 @@ pub async fn run_client(
     tls: Arc<ClientConfig>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
-    mut persist: Box<dyn Persist>,
+    persist: Box<dyn Persist>,
     resume: Option<ResumeSlot>,
 ) {
     let mut rng = OsRng;
@@ -1250,24 +1952,24 @@ pub async fn run_client(
     let mut pausing: Option<(Ended, tokio::time::Instant)> = None;
 
     let mut early: VecDeque<Command> = VecDeque::new();
-    let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
-    let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
-    let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
-    let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
-    let mut report_handles: BTreeSet<u64> = BTreeSet::new();
-    let mut tags = Tags::default();
+    let shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
+    let shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
+    let notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let report_handles: BTreeSet<u64> = BTreeSet::new();
+    let tags = Tags::default();
 
     // NET-218: the records of the user that wait for a relay
     // acknowledgment, for the ARQ of this run.
-    let mut resends = Resends::default();
+    let resends = Resends::default();
 
-    let mut device_invites: BTreeSet<u64> = BTreeSet::new();
+    let device_invites: BTreeSet<u64> = BTreeSet::new();
     // DEV-290: the handle of each device invitation whose link ended
     // before a relay made its queue. The store holds the queue of each
     // other one.
-    let mut ended_invites: BTreeSet<u64> = BTreeSet::new();
+    let ended_invites: BTreeSet<u64> = BTreeSet::new();
 
-    let mut is_foreground = true;
+    let is_foreground = true;
     let mut next_slot = deadline_after(cover_delay(&mut rng));
 
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
@@ -1278,7 +1980,7 @@ pub async fn run_client(
     // counts in days, thus a check each minute is on time. The minute
     // counts on the monotonic source (`SCP-018`): a device clock that moves
     // back stops no check, and no work of [`Update::Tick`] with it.
-    let mut next_rotation_check = tokio::time::Instant::now();
+    let next_rotation_check = tokio::time::Instant::now();
 
     // IMP-146: the batch of receipts or the digest that a slot carried,
     // until a relay answered its record. With it goes the time at which the
@@ -1286,9 +1988,9 @@ pub async fn run_client(
     // answer, thus a run that ends before it leaves the batch there. While
     // one waits, no slot asks the store for a second one: the store names
     // the batch of its last answer alone.
-    let mut carried: Option<(CoverSlot, tokio::time::Instant)> = None;
+    let carried: Option<(CoverSlot, tokio::time::Instant)> = None;
 
-    let mut last_faults = LinkFaults::default();
+    let last_faults = LinkFaults::default();
 
     // NET-100: the end of a push-wake session, or none for a run of the
     // screen or of the carrier.
@@ -1297,36 +1999,46 @@ pub async fn run_client(
     // SCP-018, SCP-019: the reading of the two clocks that this run saw
     // last, from which a tick sees a clock movement. It starts from the
     // reading of the last run of this process.
-    let mut clock_seen = *CLOCK_SEEN
+    let clock_seen = *CLOCK_SEEN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut circuit_clock = CircuitClock::after(clock_seen);
+    let circuit_clock = CircuitClock::after(clock_seen);
+
+    let mut run = Run {
+        node,
+        rng,
+        updates,
+        persist,
+        shown_chains,
+        shown_queues,
+        notify_tags,
+        rendezvous_tags,
+        report_handles,
+        tags,
+        resends,
+        device_invites,
+        ended_invites,
+        is_foreground,
+        next_rotation_check,
+        carried,
+        last_faults,
+        clock_seen,
+        circuit_clock,
+    };
 
     let ended = 'run: loop {
-        // WIR-254, WIR-339: the indices of the records of the user, and the
-        // holes of the records of the contacts.
-        for (handle, index) in node.take_send_indices() {
-            if let Some(tag) = tags.get(&handle) {
-                // NET-219: a seal is one send of the record, and the wait
-                // for its answer starts.
-                resends.left(*tag, unix_now());
-                let _ = updates.send(Update::SendIndex { tag: *tag, index });
-            }
-        }
-        for (contact, index) in node.take_lost() {
-            let _ = updates.send(Update::Lost { contact, index });
-        }
+        run.report_sends();
 
         // WIR-540: the relay answered the pause, thus each of its frames
         // arrived, and the connection closes.
-        if let Some((cause, _)) = pausing.filter(|_| node.is_paused()) {
+        if let Some((cause, _)) = pausing.filter(|_| run.node.is_paused()) {
             break 'run cause;
         }
 
         // A send that passes its deadline leaves a part of a frame on the
         // connection, thus the link counts as closed.
         let mut is_closed = false;
-        for capsule in node.take_capsules() {
+        for capsule in run.node.take_capsules() {
             if !sent_in_time(&mut link, &capsule).await {
                 is_closed = true;
                 break;
@@ -1336,11 +2048,11 @@ pub async fn run_client(
             if let Some((cause, _)) = pausing {
                 break 'run cause;
             }
-            if !node.is_resuming() {
+            if !run.node.is_resuming() {
                 break 'run Ended::LinkClosed;
             }
 
-            match open_again(&mut node, &guard, &tls, &mut rng).await {
+            match open_again(&mut run.node, &guard, &tls, &mut run.rng).await {
                 Ok(opened) => link = opened,
                 Err(ended) => break 'run ended,
             }
@@ -1349,7 +2061,7 @@ pub async fn run_client(
 
         let events = tokio::select! {
             received = link.recv() => match received {
-                Ok(bytes) => match node.on_capsule(&bytes, unix_now(), &mut rng) {
+                Ok(bytes) => match run.node.on_capsule(&bytes, unix_now(), &mut run.rng) {
                     Ok(events) => events,
                     // The link and the circuit took the cell. A step after
                     // them that sends finds no way while the session
@@ -1363,8 +2075,8 @@ pub async fn run_client(
                 },
                 Err(_) => match pausing {
                     Some((cause, _)) => break 'run cause,
-                    None if node.is_resuming() => {
-                        match open_again(&mut node, &guard, &tls, &mut rng).await {
+                    None if run.node.is_resuming() => {
+                        match open_again(&mut run.node, &guard, &tls, &mut run.rng).await {
                             Ok(opened) => link = opened,
                             Err(ended) => break 'run ended,
                         }
@@ -1385,8 +2097,8 @@ pub async fn run_client(
                 None => Vec::new(),
             },
             // WIR-547: a relay that bound the resume sends a cell soon.
-            () = tokio::time::sleep_until(resume_end), if node.is_resuming() => {
-                match open_again(&mut node, &guard, &tls, &mut rng).await {
+            () = tokio::time::sleep_until(resume_end), if run.node.is_resuming() => {
+                match open_again(&mut run.node, &guard, &tls, &mut run.rng).await {
                     Ok(opened) => link = opened,
                     Err(ended) => break 'run ended,
                 }
@@ -1396,7 +2108,7 @@ pub async fn run_client(
                 // WIR-539: the run ends at the word of the client, and the
                 // session pauses for the next run.
                 None => {
-                    if resume.is_none() || node.pause().is_err() {
+                    if resume.is_none() || run.node.pause().is_err() {
                         break 'run Ended::Stopped;
                     }
 
@@ -1405,19 +2117,19 @@ pub async fn run_client(
                     Vec::new()
                 }
                 Some(Command::Foreground(now_foreground)) => {
-                    is_foreground = now_foreground;
+                    run.is_foreground = now_foreground;
                     if now_foreground {
                         wake_end = None;
-                        node.set_wake(false);
+                        run.node.set_wake(false);
                     }
                     Vec::new()
                 }
                 Some(Command::Challenges { book, now }) => {
-                    node.set_challenges(book, now);
+                    run.node.set_challenges(book, now);
                     Vec::new()
                 }
                 Some(Command::OtherChains(chains)) => {
-                    node.set_other_chains(chains);
+                    run.node.set_other_chains(chains);
                     Vec::new()
                 }
                 Some(Command::Wake) => {
@@ -1426,7 +2138,7 @@ pub async fn run_client(
                     );
 
                     // NET-099: a push-wake session builds no spare circuit.
-                    node.set_wake(true);
+                    run.node.set_wake(true);
                     Vec::new()
                 }
                 Some(command) => {
@@ -1441,7 +2153,7 @@ pub async fn run_client(
                     None => core::future::pending().await,
                 }
             }, if pausing.is_none() => {
-                if node.pause().is_err() {
+                if run.node.pause().is_err() {
                     break 'run Ended::WakeDone;
                 }
 
@@ -1452,155 +2164,31 @@ pub async fn run_client(
             // The clock is memoryless, and it fires whether or not a cell
             // waits (`NET-049`). A fault of one slot ends no run.
             () = tokio::time::sleep_until(next_slot), if pausing.is_none() => {
-                next_slot = deadline_after(cover_delay(&mut rng));
-                let now = unix_now();
-
-                // NET-071, NET-065: a record of the user goes again in a
-                // slot: one that a relay refused with `BUSY` or
-                // `ADMISSION`, one whose send took no answer, and one whose
-                // wait after a `LIMIT` ended. Its first retransmission comes
-                // before each other item. A later one comes after an
-                // acknowledgment alone, thus before a receipt, a link-fault
-                // report, and a digest.
-                resends.unanswered(now);
-                let mut stopped = Vec::new();
-                let resend = resends.next(now, &mut stopped);
-                for tag in stopped {
-                    tags.forget(tag);
-                    let _ = updates.send(Update::Failed(tag));
-                }
-
-                if let Some((tag, is_first)) = resend {
-                    let is_free =
-                        is_first || matches!(node.on_ack_slot(now, &mut rng), Ok(false));
-                    if is_free {
-                        if let Some((contact, app)) = resends.take(tag) {
-                            match node.send(&contact, app, now, &mut rng) {
-                                Ok(handle) => {
-                                    tags.insert(handle, tag);
-                                }
-                                Err(_) => {
-                                    resends.ended(tag);
-                                    tags.forget(tag);
-                                    let _ = updates.send(Update::Unsent(tag));
-                                }
-                            }
-                        }
-                    }
-                    for contact in node.take_gaps() {
-                        let _ = updates.send(Update::DeliveryGap(contact));
-                    }
-                    Vec::new()
-                } else {
-                    // IMP-146: a batch whose record took no answer in
-                    // `CARRIED_WAIT` waits for none, and a slot carries the
-                    // batch of the store again.
-                    if carried.is_some_and(|(_, until)| tokio::time::Instant::now() >= until) {
-                        carried = None;
-                    }
-
-                    let receipt = if carried.is_none() { persist.due_receipt(now) } else { None };
-
-                    // NET-065: a digest only where no receipt waits.
-                    let asks_digest = carried.is_none() && receipt.is_none();
-                    let digest = if asks_digest { persist.due_digest(now) } else { None };
-                    let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                    let offered = digest.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                    if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
-                        node.on_cover_slot(is_foreground, given, offered, now, &mut rng)
-                    {
-                        carried = Some((slot, deadline_after(CARRIED_WAIT)));
-                    }
-                    for contact in node.take_gaps() {
-                        let _ = updates.send(Update::DeliveryGap(contact));
-                    }
-                    Vec::new()
-                }
+                next_slot = deadline_after(cover_delay(&mut run.rng));
+                run.on_slot(unix_now());
+                Vec::new()
             }
             // NET-169: a build that no relay answers ends, and the run
             // ends with its last circuit.
-            _ = tick.tick(), if pausing.is_none() => {
-                let now = unix_now();
-
-                // SCP-019: a step of the device clock of more than
-                // CLOCK_SKEW against the monotonic source interrupts each
-                // duration that runs.
-                let offset = clock_offset(now);
-                if clock_seen.is_some_and(|seen| clock_stepped(seen, offset)) {
-                    node.clock_moved(now);
-                    let _ = updates.send(Update::ClockMoved);
-                }
-                clock_seen = Some(offset);
-                if let Some(step) = circuit_clock.moved(offset) {
-                    node.circuit_clock_moved(step);
-                }
-                *CLOCK_SEEN
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(offset);
-
-                node.set_challenge_clock(now);
-                let mut events = node.on_tick(now);
-
-                // DIS-015: the rendezvous circuits start on their own delay.
-                let _ = node.start_rendezvous_due(now, &mut rng);
-
-                // NET-347: a record that waits takes a new build after one
-                // that ran out of time.
-                let _ = node.rebuild_lost(now, &mut rng);
-
-                // NET-320, NET-321: a circuit near a margin takes a spare,
-                // and the run goes on.
-                let _ = node.replace_aging(now, &mut rng);
-
-                // A `SUB` that a relay refused with `LIMIT` or `BUSY` goes
-                // again at the end of its wait.
-                let _ = node.subscribe_due(now, &mut rng);
-
-                // NET-176: a fault of one rotation ends no run, and the
-                // next check tries again.
-                if node.is_ready() && tokio::time::Instant::now() >= next_rotation_check {
-                    next_rotation_check = deadline_after(Duration::from_secs(60));
-                    events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
-                    let _ = updates.send(Update::Tick);
-                }
-
-                // The view of the connection reads the counts while the run
-                // holds them.
-                if node.faults() != &last_faults {
-                    last_faults = node.faults().clone();
-                    let _ = updates.send(Update::Faults(Box::new(last_faults.clone())));
-                }
-                events
-            }
+            _ = tick.tick(), if pausing.is_none() => run.on_tick(unix_now()),
         };
 
         // ABU-048: each `NEW` that a relay under load refused goes once
         // more with a token of this device, or with a proof of work.
         let mut events = events;
-        let asked: Vec<u64> = events
-            .iter()
-            .filter_map(|event| match event {
-                ClientEvent::AdmissionAsked { handle } => Some(*handle),
-                _ => None,
-            })
-            .collect();
-        for handle in asked {
-            if pausing.is_some() {
-                break;
-            }
-
-            let token = persist.admission_token(unix_now());
-            match node.admit_queue(handle, token.as_deref(), &mut rng) {
-                Ok(more) => events.extend(more),
-                Err(_) => break 'run Ended::NodeFault,
-            }
+        if let Err(ended) = run.admit_queues(&mut events, pausing.is_some()) {
+            break 'run ended;
         }
 
-        let asked: BTreeSet<u64> = device_invites.union(&ended_invites).copied().collect();
+        let asked: BTreeSet<u64> = run
+            .device_invites
+            .union(&run.ended_invites)
+            .copied()
+            .collect();
         let Settled {
             made,
             stores_hellos,
-        } = match settle(&mut node, persist.as_mut(), &events, &asked) {
+        } = match settle(&mut run.node, run.persist.as_mut(), &events, &asked) {
             Ok(settled) => settled,
             // The store of a run that the client ended takes no batch. The
             // relay holds each record with no `ACK`, and the next run reads
@@ -1615,443 +2203,24 @@ pub async fn run_client(
         let mut ending: Option<Ended> = None;
 
         for event in events {
-            let update = match event {
-                ClientEvent::CircuitReady => Update::Online,
-                ClientEvent::Invitation { handle, bundle } => {
-                    let queue = made
-                        .iter()
-                        .find(|(held, _)| *held == handle)
-                        .map(|(_, queue)| *queue);
-                    if ended_invites.remove(&handle) {
-                        // DEV-290: the link of this invitation ended before
-                        // a relay made its queue. It ends here, and no
-                        // party gets its bundle. The next call commits the
-                        // change, and the `DEL` leaves at a later check.
-                        if let Some(queue) = queue {
-                            let _ = node.end_invitation(&queue, &mut rng);
-                        }
-                        continue;
-                    }
-
-                    if device_invites.remove(&handle) {
-                        Update::DeviceInvitation(bundle)
-                    } else {
-                        Update::Invitation(bundle)
-                    }
-                }
-                ClientEvent::InvitationLink { fragment, .. } => Update::Invitation(fragment),
-                ClientEvent::InvitationGone { .. } => Update::InvitationGone,
-                ClientEvent::ContactReady {
-                    contact,
-                    peer_static,
-                    is_device,
-                } => Update::Contact {
-                    contact,
-                    peer_static,
-                    is_device,
-                },
-                ClientEvent::Message { contact, mut app } => {
-                    // IMP-126: the store took the record in `settle`.
-                    app.zeroize();
-                    Update::Message { contact }
-                }
-                ClientEvent::VerificationCode { contact, code } => {
-                    Update::VerificationCode { contact, code }
-                }
-                // IDN-170: the code that the view shows verifies no more.
-                ClientEvent::VerificationEnded { contact } => Update::VerificationRefused(contact),
-                ClientEvent::Accepted { handle } => match tags.remove(&handle) {
-                    Some(tag) => {
-                        resends.ended(tag);
-                        // An answer to an earlier send of this record
-                        // names no record of the run any more.
-                        tags.forget(tag);
-                        Update::Sent(tag)
-                    }
-                    None => continue,
-                },
-                ClientEvent::Room { handle, remaining } => match tags.get(&handle) {
-                    Some(tag) => Update::Room {
-                        tag: *tag,
-                        remaining,
-                    },
-                    None => continue,
-                },
-                // NET-218: a `LIMIT` of a full queue ends no send.
-                ClientEvent::Rejected {
-                    handle,
-                    reason: umbra_queue::Reject::Limit,
-                } if tags.contains_key(&handle) => match tags.remove(&handle) {
-                    // The client holds the record for the room of the
-                    // queue, and it gives it to a later send (`IMP-082`).
-                    Some(tag) => {
-                        resends.ended(tag);
-                        tags.forget(tag);
-                        Update::Held(tag)
-                    }
-                    None => continue,
-                },
-                // NET-218: a `BUSY` or an `ADMISSION` ends no send. The
-                // record stays queued, and a slot carries it again.
-                ClientEvent::Rejected {
-                    handle,
-                    reason: reason @ (umbra_queue::Reject::Busy | umbra_queue::Reject::Admission),
-                } if tags.contains_key(&handle) => match tags.remove(&handle) {
-                    Some(tag) if resends.refused(tag, reason, unix_now()) => continue,
-                    // NET-219 to NET-221: the ARQ stopped, and the record
-                    // fails.
-                    Some(tag) => {
-                        tags.forget(tag);
-                        Update::Failed(tag)
-                    }
-                    None => continue,
-                },
-                ClientEvent::Rejected { handle, reason } => match tags.remove(&handle) {
-                    Some(tag) => {
-                        resends.ended(tag);
-                        tags.forget(tag);
-                        Update::Failed(tag)
-                    }
-                    // A relay refused the `NEW` of a rendezvous queue.
-                    None => match rendezvous_tags.remove(&handle) {
-                        Some(tag) => Update::RendezvousRefused(tag),
-                        // REL-208: the authority hears of its refused `NEW`.
-                        None if report_handles.remove(&handle) => {
-                            Update::ReportQueueRefused(Some(reason))
-                        }
-                        // The store holds the group as one that waits for
-                        // its notify queue, and only this update ends that.
-                        None => match notify_tags.remove(&handle) {
-                            Some(tag) => Update::NotifyRefused(tag),
-                            None => continue,
-                        },
-                    },
-                },
-                // The node of the queues sends no chunk command and no
-                // group-queue command, thus it gets no such answer. The
-                // transfer of Part 12 has a node and a connection of its
-                // own (§12.8), and a group queue takes a session that
-                // carries no other range (`GRP-186`).
-                ClientEvent::Chunk { .. }
-                | ClientEvent::Group { .. }
-                | ClientEvent::GroupRecord { .. } => continue,
-                ClientEvent::NotifyQueue {
-                    handle,
-                    recipient_id,
-                    address,
-                } => match notify_tags.remove(&handle) {
-                    Some(tag) => Update::NotifyQueue {
-                        tag,
-                        recipient_id,
-                        address,
-                    },
-                    None => continue,
-                },
-                ClientEvent::Digest { id, .. } => Update::Digest { group_queue_id: id },
-                ClientEvent::RendezvousQueue {
-                    handle,
-                    recipient_id,
-                    address,
-                } => match rendezvous_tags.remove(&handle) {
-                    Some(tag) => Update::RendezvousQueue {
-                        tag,
-                        recipient_id,
-                        address,
-                    },
-                    None => continue,
-                },
-                // WIR-115: the store took the hello with its queue cursor.
-                ClientEvent::Hello { .. } if stores_hellos => continue,
-                ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
-                ClientEvent::ReportQueue {
-                    handle, address, ..
-                } => {
-                    report_handles.remove(&handle);
-                    Update::ReportQueue { address }
-                }
-                ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
-                // The contact follows flight 1 of the addressee.
-                ClientEvent::HelloSent { .. } | ClientEvent::AdmissionAsked { .. } => continue,
-                ClientEvent::NotifyKey {
-                    recipient_id,
-                    relay_ntf_pk,
-                } => Update::NotifyKey {
-                    recipient_id,
-                    relay_ntf_pk,
-                },
-                ClientEvent::NotifierId {
-                    recipient_id,
-                    notifier_id,
-                } => Update::NotifierId {
-                    recipient_id,
-                    notifier_id,
-                },
-                // A watch runs in a node of its own (`NTF-142`).
-                ClientEvent::Wake { .. } => continue,
-                ClientEvent::QueueEnded { queue } => Update::QueueEnded(queue),
-                ClientEvent::ChannelDead { contact } => Update::ChannelDead(contact),
-                ClientEvent::QueueRotated { contact, address } => Update::QueueRotated {
-                    contact,
-                    address: Zeroizing::new(address),
-                },
-                ClientEvent::PeerMoved { contact } => Update::PeerMoved(contact),
-                ClientEvent::CandidateSent { contact } => Update::CandidateSent(contact),
-                // IMP-146, NET-054: a relay answered the record of the
-                // batch, and the store erases it. An answer that names no
-                // batch of this run, as one that came past `CARRIED_WAIT`,
-                // erases nothing.
-                ClientEvent::Carried { slot } => {
-                    if carried.is_some_and(|(held, _)| held == slot) {
-                        carried = None;
-                        match slot {
-                            CoverSlot::Receipt => persist.receipt_sent(),
-                            CoverSlot::Digest => persist.digest_sent(),
-                            _ => {}
-                        }
-                    }
-                    continue;
-                }
-                ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
-                // NET-355: the store holds the bundle that waits, in the
-                // batch of this call, and the client reads the question
-                // from there.
-                ClientEvent::RenewalAsked { .. } | ClientEvent::RenewalAskEnded { .. } => continue,
-                // A run that pauses reads on to the `SessionPaused`.
-                ClientEvent::CircuitLost | ClientEvent::CircuitAged if pausing.is_some() => {
-                    continue
-                }
-                // A circuit that still builds or serves keeps the run. The
-                // node builds its last circuit again at once, and
-                // `rebuild_lost` builds each other one at a tick. Thus one
-                // relay that ends one circuit ends no run.
-                ClientEvent::CircuitLost if node.has_circuit() => continue,
-                ClientEvent::CircuitLost => {
-                    ending.get_or_insert(Ended::CircuitLost);
-                    continue;
-                }
-                ClientEvent::CircuitAged => {
-                    ending.get_or_insert(Ended::Aged);
-                    continue;
-                }
-            };
-            let _ = updates.send(update);
+            let update = run.update_of(event, &made, stores_hellos, pausing.is_some(), &mut ending);
+            if let Some(update) = update {
+                let _ = run.updates.send(update);
+            }
         }
         if let Some(ended) = ending {
             break 'run ended;
         }
 
-        let chains = node.chains();
-        if chains != shown_chains {
-            shown_chains.clone_from(&chains);
-            let _ = updates.send(Update::Circuits(chains));
-        }
+        run.show_circuits();
 
-        let queues = node.inbound_queues();
-        if queues != shown_queues {
-            shown_queues.clone_from(&queues);
-            let _ = updates.send(Update::Queues(queues));
-        }
-
-        while node.is_ready() && pausing.is_none() {
+        while run.node.is_ready() && pausing.is_none() {
             let Some(command) = early.pop_front() else {
                 break;
             };
 
-            let now = unix_now();
-
-            // A value of the user ends no runtime: a bad bundle and a send
-            // to no contact fail that one command.
-            match command {
-                // The loop above takes these commands.
-                Command::Foreground(_)
-                | Command::Wake
-                | Command::Challenges { .. }
-                | Command::OtherChains(_) => {}
-                Command::SetClass { contact, class } => node.set_contact_class(&contact, class),
-                Command::Invite => {
-                    if node.invite_link(&mut rng).is_err() {
-                        let _ = updates.send(Update::Refused);
-                    }
-                }
-                Command::InviteDevice => match node.invite_device(&mut rng) {
-                    Ok(handle) => {
-                        device_invites.insert(handle);
-                    }
-                    Err(_) => {
-                        let _ = updates.send(Update::Refused);
-                    }
-                },
-                Command::AcceptDevice(bundle) => {
-                    if node.accept_device(bundle, &mut rng).is_err() {
-                        let _ = updates.send(Update::Refused);
-                    }
-                }
-                // DEV-290: a link that ended retires its sync invitation.
-                // A queue whose handshake finished holds no half, and the
-                // call changes nothing for it.
-                Command::EndDeviceInvitation(queues) => {
-                    ended_invites.append(&mut device_invites);
-                    for queue in queues {
-                        let _ = node.end_invitation(&queue, &mut rng);
-                    }
-                }
-                Command::Accept(given) => {
-                    let accepted = if given.len() == FRAGMENT_LEN {
-                        node.accept_link(&given, &mut rng)
-                    } else {
-                        node.accept(given, &mut rng)
-                    };
-                    if accepted.is_err() {
-                        let _ = updates.send(Update::Refused);
-                    }
-                }
-                Command::Verify(contact) => {
-                    if node.start_verification(&contact, now, &mut rng).is_err() {
-                        let _ = updates.send(Update::VerificationRefused(contact));
-                    }
-                }
-                Command::ConfirmVerified(contact) => {
-                    let update = match node.confirm_verification(&contact) {
-                        Ok(peer_static) => Update::Verified {
-                            contact,
-                            peer_static,
-                        },
-                        Err(_) => Update::VerificationRefused(contact),
-                    };
-                    let _ = updates.send(update);
-                }
-                Command::Send {
-                    contact,
-                    app,
-                    tag,
-                    prior,
-                } => {
-                    match resends.hold(tag, contact, app, prior, now) {
-                        // NET-219 to NET-221: the ARQ of the record stopped
-                        // in an earlier run, and the record fails.
-                        None => {
-                            let _ = updates.send(Update::Failed(tag));
-                        }
-                        // NET-071: the retry after a `LIMIT` takes a slot.
-                        Some(_) if prior.in_slot => resends.wait(tag),
-                        Some(app) => match node.send(&contact, app, now, &mut rng) {
-                            Ok(handle) => {
-                                tags.insert(handle, tag);
-                            }
-                            Err(_) => {
-                                resends.ended(tag);
-                                let _ = updates.send(Update::Unsent(tag));
-                            }
-                        },
-                    }
-                }
-                // A queue that no circuit serves any more takes its binding
-                // in a later run, thus a failure here ends nothing.
-                Command::MakeNotifyQueue(tag) => match node.make_notify_queue(&mut rng) {
-                    Ok(handle) => {
-                        notify_tags.insert(handle, tag);
-                    }
-                    Err(_) => {
-                        let _ = updates.send(Update::NotifyRefused(tag));
-                    }
-                },
-                Command::EndNotifyQueue(recipient_id) => {
-                    let _ = node.end_notify_queue(&recipient_id, &mut rng);
-                }
-                Command::RotateNow(contact) => {
-                    let _ = node.rotate_now(&contact);
-                }
-                Command::RotateSwept(contact, guard) => {
-                    let _ = if guard {
-                        node.rotate_swept(&contact, now, &mut rng)
-                    } else {
-                        node.sweep_again(&contact, now, &mut rng)
-                    };
-                }
-                Command::PeerMoved {
-                    contact,
-                    address,
-                    dead,
-                    sent,
-                } => {
-                    let told = node.peer_candidate(&contact, &address, dead, sent, now, &mut rng);
-
-                    // NET-191: the store learns of the one send.
-                    for event in told.unwrap_or_default() {
-                        if let ClientEvent::CandidateSent { contact } = event {
-                            let _ = updates.send(Update::CandidateSent(contact));
-                        }
-                    }
-                }
-                Command::PeerKey { contact, key } => {
-                    let _ = node.set_peer_key(&contact, key);
-                }
-                Command::AnswerRenewal { contact, accept } => {
-                    let _ = node.answer_renewal(&contact, accept, &mut rng);
-                }
-                #[cfg(feature = "sockets-test")]
-                Command::EndSweeps => {
-                    node.end_sweeps(now);
-                    next_rotation_check = tokio::time::Instant::now();
-                }
-                Command::NotifyQueue {
-                    recipient_id,
-                    notifier_pk,
-                } => {
-                    let _ = node.notify_queue(&recipient_id, &notifier_pk, &mut rng);
-                }
-                Command::BindQueue {
-                    recipient_id,
-                    sealed,
-                } => {
-                    let _ = node.bind_queue(&recipient_id, &sealed, &mut rng);
-                }
-                Command::MakeRendezvousQueue(tag) => match node.make_rendezvous_queue(&mut rng) {
-                    Ok(handle) => {
-                        rendezvous_tags.insert(handle, tag);
-                    }
-                    Err(_) => {
-                        let _ = updates.send(Update::RendezvousRefused(tag));
-                    }
-                },
-                Command::MakeReportQueue => match node.make_report_queue(&mut rng) {
-                    Ok(handle) => {
-                        report_handles.insert(handle);
-                    }
-                    Err(_) => {
-                        let _ = updates.send(Update::ReportQueueRefused(None));
-                    }
-                },
-                Command::OpenCircuit(relay) => {
-                    let _ = node.open_circuit(relay, &mut rng);
-                }
-                Command::Probe => {
-                    let _ = updates.send(match node.probe() {
-                        Ok((chain, tags)) => Update::Probe { chain, tags },
-                        Err(_) => Update::ProbeFailed,
-                    });
-                }
-                Command::EndRendezvousQueue(recipient_id) => {
-                    let _ = node.end_rendezvous_queue(&recipient_id, &mut rng);
-                }
-                Command::Hello {
-                    entry_pk,
-                    rendezvous,
-                    profile,
-                    token,
-                } => {
-                    let epoch = umbra_core::abuse::epoch_number(now);
-                    let _ = node.hello(
-                        &entry_pk,
-                        &rendezvous,
-                        &profile,
-                        epoch,
-                        token.as_deref(),
-                        &mut rng,
-                    );
-                }
-            }
-            if let Err(ended) = settle(&mut node, persist.as_mut(), &[], &BTreeSet::new()) {
+            run.run_command(command, unix_now());
+            if let Err(ended) = settle(&mut run.node, run.persist.as_mut(), &[], &BTreeSet::new()) {
                 break 'run ended;
             }
         }
@@ -2062,7 +2231,7 @@ pub async fn run_client(
     // with no pause resumes only when no frame was in flight.
     let parked = match ended {
         Ended::WakeDone | Ended::Stopped | Ended::LinkClosed if resume.is_some() => {
-            node.park(unix_now())
+            run.node.park(unix_now())
         }
         _ => None,
     };
@@ -2070,7 +2239,7 @@ pub async fn run_client(
     // WIR-246: a session that no run continues ends at the relay now, and
     // the relay holds no circuit for it.
     if parked.is_none() {
-        if let Some(capsule) = node.close() {
+        if let Some(capsule) = run.node.close() {
             let _ = tokio::time::timeout(CLOSE_WAIT, link.send(&capsule)).await;
         }
     }
@@ -2079,8 +2248,10 @@ pub async fn run_client(
     }
 
     // REL-172: the counts go to the next run.
-    let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
-    let _ = updates.send(Update::Offline(ended));
+    let _ = run
+        .updates
+        .send(Update::Faults(Box::new(run.node.take_faults())));
+    let _ = run.updates.send(Update::Offline(ended));
 }
 
 #[cfg(test)]

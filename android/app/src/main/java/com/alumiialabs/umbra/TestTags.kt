@@ -73,6 +73,8 @@ object TestTags {
     const val CONTACT_VERIFY = "contact_verify"
     const val CONTACT_DELETE = "contact_delete"
     const val CONTACT_BLOCK = "contact_block"
+    const val CONTACT_DELIVERY_RECEIPTS = "contact_delivery_receipts"
+    const val CONTACT_READ_RECEIPTS = "contact_read_receipts"
     const val VERIFY_SCAN = "verify_scan"
     const val VERIFY_SHORT_CODE = "verify_short_code"
     const val VERIFY_FULL_NUMBER = "verify_full_number"
