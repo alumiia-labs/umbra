@@ -103,7 +103,11 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                 ) { push(Screen.Verify(chat.conversation)) },
             )
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("photo-film", stringResource(R.string.common_media_and_files)) { push(Screen.Media(chat.conversation)) })
+            EntryRow(
+                RowEntry("photo-film", stringResource(R.string.common_media_and_files), tag = TestTags.DETAILS_MEDIA) {
+                    push(Screen.Media(chat.conversation))
+                },
+            )
 
             SectionLabel(stringResource(R.string.common_notifications))
             AlertRows(chat)

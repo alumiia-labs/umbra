@@ -6,9 +6,18 @@ continues from the state of the one before it, thus the order is fixed.
     python run.py emulator-5554 emulator-5556 [emulator-5558]
 """
 
+import array
+import math
+import os
+import shutil
+import struct
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
+import wave
+import zlib
 
 from driver import Device, Fault, summary, text_of
 
@@ -205,18 +214,166 @@ def scenario_file(devices):
     alice.tap("chat_attach")
     alice.tap("attach_file")
 
-    # The picker is a view of the system, thus its controls have no test name.
-    alice.tap_node(alice.wait_described("Show roots"))
-    alice.tap_node(alice.wait_text("Downloads"))
-    alice.tap_node(alice.wait_text("umbra-note.txt"))
+    alice.pick_file("umbra-note.txt")
 
     alice.wait("message_file", 60, text="umbra-note.txt")
     bob.wait("message_file", 120, text="umbra-note.txt")
 
 
+def picture():
+    """A file with a small picture of one color, in the PNG form."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    side = 64
+    rows = b"".join(bytes([0]) + bytes([40, 120, 90]) * side for _ in range(side))
+    header = struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0)
+    magic = bytes([0x89]) + b"PNG" + bytes([0x0D, 0x0A, 0x1A, 0x0A])
+    path = os.path.join(tempfile.gettempdir(), "umbra-e2e-photo.png")
+    with open(path, "wb") as out:
+        out.write(magic + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+    return path
+
+
+def scenario_photo(devices):
+    """A picture from the photo picker of the system arrives."""
+    alice, bob = devices[0], devices[1]
+    alice.run("push", picture(), "/sdcard/Pictures/umbra-photo.png")
+    alice.shell("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Pictures/umbra-photo.png")
+    time.sleep(4)
+
+    alice.tap("chat_attach")
+    alice.tap("attach_photo")
+    alice.tap_node(alice.wait_described("Photo taken", prefix=True))
+
+    alice.wait("message_photo", 60)
+    bob.wait("message_photo", 120)
+
+
+TONE_HZ = 440
+TONE_SECONDS = 3
+RATE = 48_000
+
+
+def tone():
+    """A file with a tone of one pitch, in the WAV form."""
+    samples = array.array(
+        "h",
+        (int(8_000 * math.sin(2 * math.pi * TONE_HZ * at / RATE)) for at in range(RATE * TONE_SECONDS)),
+    )
+    path = os.path.join(tempfile.gettempdir(), "umbra-e2e-tone.wav")
+    with wave.open(path, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(RATE)
+        out.writeframes(samples.tobytes())
+
+    return path
+
+
+def sound_of(path):
+    """The length in seconds, the pitch in Hz, and the level of an audio file."""
+    decoded = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    samples = array.array("h", decoded)
+    seconds = len(samples) / RATE
+
+    # A tone crosses zero two times in each period.
+    crossings = sum(1 for at in range(1, len(samples)) if (samples[at - 1] < 0) != (samples[at] < 0))
+    level = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+
+    return seconds, crossings / 2 / seconds, level
+
+
+def scenario_audio(devices):
+    """An audio file keeps its length, its pitch, and its level on the way to the contact."""
+    alice, bob = devices[0], devices[1]
+    sent = tone()
+    alice.run("push", sent, "/sdcard/Download/umbra-tone.wav")
+    bob.shell("rm -f /sdcard/Download/umbra-tone.m4a")
+
+    alice.tap("chat_attach")
+    alice.tap("attach_audio")
+    alice.pick_file("umbra-tone.wav")
+    # The app encodes the file, thus the name has another ending.
+    alice.wait("message_voice", 120, text="umbra-tone")
+    tile = bob.wait("message_voice", 180, text="umbra-tone")
+
+    # The first node under the tile is its play control.
+    bob.tap_node(list(tile.iter("node"))[1])
+    deadline = time.monotonic() + 10
+    while not bob.plays_audio():
+        if time.monotonic() > deadline:
+            raise Fault("the audio message does not play")
+        time.sleep(0.3)
+
+    if shutil.which("ffmpeg") is None:
+        print("      no ffmpeg on this machine: the sound of the file is not compared")
+        return
+
+    # The file leaves the store only by a save of the user.
+    time.sleep(TONE_SECONDS + 1)
+    bob.tap("common_bar_title")
+    bob.tap_node(bob.scroll_to("details_media"))
+    bob.tap_node(bob.wait_text("umbra-tone"))
+    bob.tap("media_save")
+    # The save dialog of the system has no test name.
+    deadline = time.monotonic() + 30
+    while True:
+        buttons = [node for node in bob.nodes() if node.get("resource-id") == "android:id/button1"]
+        if buttons:
+            bob.tap_node(buttons[0])
+            break
+        if time.monotonic() > deadline:
+            raise Fault("the system shows no save dialog")
+        time.sleep(0.5)
+    time.sleep(4)
+
+    received = os.path.join(tempfile.gettempdir(), "umbra-e2e-received.m4a")
+    bob.run("pull", "/sdcard/Download/umbra-tone.m4a", received)
+    seconds, pitch, level = sound_of(received)
+    _, _, sent_level = sound_of(sent)
+    if abs(seconds - TONE_SECONDS) > 0.3:
+        raise Fault(f"the audio has {seconds:.2f} s, and the tone has {TONE_SECONDS} s")
+    if abs(pitch - TONE_HZ) > TONE_HZ * 0.05:
+        raise Fault(f"the audio has {pitch:.0f} Hz, and the tone has {TONE_HZ} Hz")
+    if abs(level - sent_level) > sent_level * 0.25:
+        raise Fault(f"the audio has the level {level:.0f}, and the tone has {sent_level:.0f}")
+
+    open_chat(bob, "Alice")
+
+
+def scenario_voice(devices):
+    """A recording of the microphone arrives as a voice message of its length."""
+    alice, bob = devices[0], devices[1]
+    before = len(bob.find_all("message_voice"))
+
+    # With no text in the field, the send control starts a recording.
+    alice.tap("chat_send")
+    time.sleep(4)
+    alice.tap("chat_send")
+
+    deadline = time.monotonic() + 180
+    while len(bob.find_all("message_voice")) <= before:
+        if time.monotonic() > deadline:
+            raise Fault("the voice message does not arrive")
+        time.sleep(2)
+
+    length = text_of(bob.find_all("message_voice")[-1])
+    if not any(mark in length for mark in ("0:04", "0:05", "0:06", "0:07")):
+        raise Fault(f"the voice message shows the length '{length}' for a recording of 4 s")
+
+
 def scenario_notification(devices):
     """A message to an app behind the home screen raises an alert, and no read receipt."""
     alice, bob = devices[0], devices[1]
+    send(alice, "bob reads this one")
+    bubble(bob, "chat_bubble_in", "bob reads this one")
+
     bob.shell("input keyevent KEYCODE_HOME")
     time.sleep(3)
     send(alice, "bob looks at the home screen")
@@ -227,18 +384,24 @@ def scenario_notification(devices):
             raise Fault("the message raised no alert")
         time.sleep(3)
 
-    bob.start()
-    bubble(bob, "chat_bubble_in", "bob looks at the home screen", 60)
-
 
 def scenario_receipts_arrive(devices):
     """NET-050: a receipt leaves in a cover slot after its delay, thus it takes minutes."""
-    alice = devices[0]
+    alice, bob = devices[0], devices[1]
+    # A read message shows no state after its time.
     deadline = time.monotonic() + 600
-    while "Accepted" in text_of(bubble(alice, "chat_bubble_out", "with receipts")):
+    while "·" in text_of(bubble(alice, "chat_bubble_out", "bob reads this one")):
         if time.monotonic() > deadline:
-            raise Fault("no receipt moved the state of the message")
+            raise Fault("no read receipt moved the state of the message")
         time.sleep(5)
+
+    # The chat of Bob is behind the home screen, thus it read nothing more.
+    hidden = text_of(bubble(alice, "chat_bubble_out", "bob looks at the home screen"))
+    if "·" not in hidden:
+        raise Fault("a chat behind the home screen sent a read receipt")
+
+    bob.start()
+    bubble(bob, "chat_bubble_in", "bob looks at the home screen", 60)
 
 
 def scenario_edit(devices):
@@ -496,9 +659,8 @@ def scenario_removal(devices):
     carol.wait("chat_stopped", 60)
 
 
-def scenario_link(devices):
-    """A third emulator joins the device set of the first one."""
-    alice, tablet = devices[0], devices[2]
+def link(alice, tablet):
+    """Clears the tablet, and joins it to the device set of the first user."""
     home(alice)
     tablet.prepare()
     tablet.install(APK)
@@ -507,7 +669,6 @@ def scenario_link(devices):
     tablet.start()
     tablet.wait("unlock_link", 90)
     tablet.tap("unlock_link")
-
     # The ticket works for 2 minutes, thus the new device is ready first.
     alice.tap("tabs_settings")
     alice.tap_node(alice.scroll_to("settings_devices"))
@@ -533,6 +694,11 @@ def scenario_link(devices):
 
     tablet.wait("tabs_chats", 120)
     tablet.wait("chats_row_title", 120, text="Bob")
+
+
+def scenario_link(devices):
+    """A third emulator joins the device set of the first one."""
+    link(devices[0], devices[2])
 
 
 def scenario_linked_messages(devices):
@@ -580,6 +746,40 @@ def scenario_device_removal(devices):
     send(bob, "after the device removal")
     bubble(alice, "chat_bubble_in", "after the device removal", 60)
     absent(tablet, "chat_bubble_in", "after the device removal")
+
+
+def scenario_removal_while_closed(devices):
+    """DEV-181: a device that was closed at its removal learns of it at its next run."""
+    alice, tablet = devices[0], devices[2]
+    link(alice, tablet)
+    tablet.stop()
+
+    home(alice)
+    alice.tap("tabs_settings")
+    alice.tap_node(alice.scroll_to("settings_devices"))
+    alice.wait("devices_link")
+    alice.tap_node(alice.find_all("devices_row")[-1])
+    alice.tap("devices_remove")
+    time.sleep(10)
+
+    # The removal can come before or after the first view, thus a lock can
+    # come one time on the way to the chat.
+    tablet.start()
+    deadline = time.monotonic() + 300
+    while not tablet.visible("chat_stopped"):
+        if time.monotonic() > deadline:
+            raise Fault(f"the removed device still takes a message: {summary(tablet.nodes())}")
+        if tablet.visible("unlock_open"):
+            unlock(tablet)
+            time.sleep(5)
+        elif tablet.visible("chats_row_title"):
+            tablet.tap("chats_row_title", text="Bob")
+            time.sleep(5)
+        elif tablet.visible("chat_input"):
+            tablet.back()
+            time.sleep(5)
+        else:
+            time.sleep(2)
 
 
 def scenario_restore(devices):
@@ -634,6 +834,9 @@ SCENARIOS = [
     ("search", scenario_search, 2),
     ("receipts", scenario_receipts, 2),
     ("file", scenario_file, 2),
+    ("photo", scenario_photo, 2),
+    ("audio", scenario_audio, 2),
+    ("voice", scenario_voice, 2),
     ("notification", scenario_notification, 2),
     ("receipts arrive", scenario_receipts_arrive, 2),
     ("lock", scenario_lock, 2),
@@ -646,6 +849,7 @@ SCENARIOS = [
     ("link", scenario_link, 3),
     ("linked messages", scenario_linked_messages, 3),
     ("device removal", scenario_device_removal, 3),
+    ("removal while closed", scenario_removal_while_closed, 3),
     ("restore", scenario_restore, 2),
 ]
 

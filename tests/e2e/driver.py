@@ -33,9 +33,37 @@ class Device:
         return self.run("shell", command, check=check, timeout=timeout).decode(errors="replace")
 
     def prepare(self):
-        """Stops each animation, thus a dump waits for no idle state."""
+        """Stops each animation, thus a dump waits for no idle state. Sets the media volume to 0."""
         for scale in ("window_animation_scale", "transition_animation_scale", "animator_duration_scale"):
             self.shell(f"settings put global {scale} 0")
+        self.shell("cmd media_session volume --stream 3 --set 0", check=False)
+
+    def pick_file(self, name):
+        """Chooses a file of the Downloads folder in the file picker of the system."""
+        for _ in range(6):
+            nodes = self.nodes()
+            for node in nodes:
+                if node.get("text") == name:
+                    self.tap_node(node)
+                    return
+
+            # The picker opens at the folder of its last use, or at the recent files.
+            for node in nodes:
+                if node.get("content-desc") == "Show roots":
+                    self.tap_node(node)
+                    time.sleep(1.5)
+                    break
+            folders = [n for n in self.nodes() if n.get("text") == "Downloads" and n.get("resource-id") == "android:id/title"]
+            if folders:
+                self.tap_node(folders[-1])
+            time.sleep(2)
+        raise Fault(f"{self.serial}: the picker shows no file '{name}'; on the screen: {summary(self.nodes())}")
+
+    def plays_audio(self):
+        """Whether a player of the app runs now."""
+        uid = self.shell(f"pm list packages -U {PACKAGE}").strip().rsplit("uid:", 1)[-1]
+        lines = self.shell("dumpsys audio", check=False).splitlines()
+        return any(f"u/pid:{uid}/" in line and "state:started" in line for line in lines)
 
     def install(self, apk):
         self.run("install", "-r", "-g", apk, timeout=300)
@@ -111,13 +139,14 @@ class Device:
                 raise Fault(f"{self.serial}: no text '{text}' after {timeout} s; on the screen: {summary(nodes)}")
             time.sleep(0.5)
 
-    def wait_described(self, description, timeout=30):
-        """Waits for a control of the system by its content description."""
+    def wait_described(self, description, timeout=30, prefix=False):
+        """Waits for a control of the system by its content description, or by the start of it."""
         deadline = time.monotonic() + timeout
         while True:
             nodes = self.nodes()
             for node in nodes:
-                if node.get("content-desc") == description:
+                held = node.get("content-desc") or ""
+                if held == description or (prefix and held.startswith(description)):
                     return node
             if time.monotonic() > deadline:
                 raise Fault(f"{self.serial}: no control '{description}' after {timeout} s; on the screen: {summary(nodes)}")

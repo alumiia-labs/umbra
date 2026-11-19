@@ -202,6 +202,7 @@ object TestTags {
     const val MESSAGE_VOICE = "message_voice"
     const val MESSAGE_FILE = "message_file"
     const val MEDIA_SAVE = "media_save"
+    const val DETAILS_MEDIA = "details_media"
     const val MEDIA_EMPTY = "media_empty"
     const val CHAT_AUDIO_STOP = "chat_audio_stop"
 

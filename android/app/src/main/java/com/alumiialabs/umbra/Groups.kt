@@ -132,7 +132,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             }
             Spacer(Modifier.height(16.dp))
 
-            EntryRow(RowEntry("photo-film", stringResource(R.string.common_media_and_files)) { push(Screen.Media(chat.conversation)) })
+            EntryRow(
+                RowEntry("photo-film", stringResource(R.string.common_media_and_files), tag = TestTags.DETAILS_MEDIA) {
+                    push(Screen.Media(chat.conversation))
+                },
+            )
             HorizontalDivider(color = Palette.Divider)
             FactRow("file-lines", stringResource(R.string.group_identifier), chat.conversation.label)
 

@@ -4526,6 +4526,27 @@ fn request_until_listed(handle: &Handle, target: &str) {
     request_with_note(handle, target, "");
 }
 
+/// The result of `act`, which goes again after `Busy`. That is the answer
+/// of a directory or a relay with no free place now, and a user then asks
+/// again.
+#[track_caller]
+fn until_free<T>(mut act: impl FnMut() -> Result<T, FfiError>) -> T {
+    let start = Instant::now();
+    loop {
+        match act() {
+            Ok(made) => return made,
+            Err(FfiError::Busy) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(40),
+                    "the directory stays busy"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+}
+
 /// A request with a note, once the log lists its target.
 #[track_caller]
 fn request_with_note(handle: &Handle, target: &str, note: &str) {
@@ -4620,7 +4641,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert!(alice.has_directory());
 
     // A reusable link, and the request of Bob to it.
-    let link = alice.create_public_link(0).unwrap();
+    let link = until_free(|| alice.create_public_link(0));
     assert!(link.link.starts_with("umbra://p/"));
     bob.set_profile_name("Bob".into()).unwrap();
 
@@ -4824,7 +4845,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
 
     // DIS-172: a timed link registers with its lease, which the directory
     // keeps, and it takes requests before its end.
-    let timed = alice.create_public_link(3_600).unwrap();
+    let timed = until_free(|| alice.create_public_link(3_600));
     assert!(timed.expires_at > 0);
     request_until_listed(&carol, &timed.link);
 

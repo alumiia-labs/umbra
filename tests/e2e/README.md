@@ -24,10 +24,18 @@ UI Automator. The tests need Python 3 and no other package.
 3. Start the emulators. Each one needs about 2 GB of memory.
 
    ```sh
-   emulator -avd umbra-e2e1 -port 5554 -no-snapshot -no-audio &
-   emulator -avd umbra-e2e2 -port 5556 -no-snapshot -no-audio &
-   emulator -avd umbra-e2e3 -port 5558 -no-snapshot -no-audio &
+   emulator -avd umbra-e2e1 -port 5554 -no-snapshot &
+   emulator -avd umbra-e2e2 -port 5556 -no-snapshot &
+   emulator -avd umbra-e2e3 -port 5558 -no-snapshot &
    ```
+
+   The emulators run with audio, because two scenarios record and play
+   sound. The script sets the media volume of each emulator to 0. Do not
+   give the emulator the microphone of the host: the emulated microphone
+   then records silence, which is enough for the test.
+
+   The `audio` scenario compares the sound only when `ffmpeg` is on the
+   path of the host.
 
 4. Run the scenarios from this directory.
 
@@ -49,8 +57,11 @@ Each scenario continues from the state of the one before it.
 | messages | A message goes in each direction. |
 | receipts | The contact turns on the two receipts. |
 | file | A file from the picker of the system arrives with its name. |
+| photo | A picture from the photo picker of the system arrives. |
+| audio | An audio file with a tone keeps its length, its pitch, and its level. Its player runs. |
+| voice | A recording of the microphone arrives as a voice message of its length. |
 | notification | A message to an app behind the home screen raises an alert. |
-| receipts arrive | A receipt moves the state of a sent message. |
+| receipts arrive | A read receipt moves the state of a sent message. A chat behind the home screen sends none. |
 | edit | An edit shows at the contact. |
 | reaction | A reaction shows at the sender. |
 | reply | A reply shows with the text that it answers. |
@@ -68,6 +79,7 @@ Each scenario continues from the state of the one before it.
 | link | A third emulator joins the device set and gets the contacts. |
 | linked messages | Each device of the set gets a message and can send. |
 | device removal | A removed device leaves the list, locks one time, and can send no more. |
+| removal while closed | A device that was closed at its removal can send no more after its start. |
 | restore | An erased device takes its identity again from the recovery code. |
 
 A full run takes about 20 minutes. The third emulator is a third user first. The `link` scenario
