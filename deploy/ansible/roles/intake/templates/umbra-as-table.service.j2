@@ -1,0 +1,28 @@
+[Unit]
+Description=UMBRA intake: a new table of the address ranges of each autonomous system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=umbra-intake
+Group=umbra-intake
+WorkingDirectory=/var/lib/umbra-intake/table
+# A table of few lines is a failed download, thus it does not take the
+# place of the table that is there. The intake reads a new file by itself.
+# `$$` is one `$` for the shell.
+ExecStart=/bin/sh -c 'set -eu; \
+    curl -fsS --max-time 300 --proto =https -o table.gz "{{ umbra_as_table_url }}"; \
+    gunzip -c table.gz > table.part; \
+    test "$$(wc -l < table.part)" -gt 100000; \
+    mv table.part ip2asn-v4.tsv; \
+    rm -f table.gz'
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+UMask=0077
+ReadWritePaths=/var/lib/umbra-intake/table
+InaccessiblePaths=-/var/lib/umbra-signer

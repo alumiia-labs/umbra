@@ -365,8 +365,17 @@ The next run copies `target/deploy/bin` again. Build the older commit with
 
 ## Admitting a relay of another operator
 
-A person who runs a relay of `deploy/relay` opens a relay request on GitHub
-with its join request. Admit it so:
+A relay of `deploy/relay` sends its join request to the intake on the
+signer server (Part 10 §10.6.4). The intake checks that the request comes
+from the address of its descriptor, and that the signature holds. It
+admits nothing. Fetch the requests that wait:
+
+```sh
+ansible-playbook inbox.yml
+```
+
+Each request is then in `build/inbox/<relay_id>.request`. A person can also
+open a relay request on GitHub with the same text. Admit a request so:
 
 1. Check the dossier (Part 10 `REL-012`): the operator, the control, the
    contact, the country, and the AS number of the address (`whois`). Check
@@ -388,7 +397,18 @@ with its join request. Admit it so:
    descriptor: that is a new address of the same relay.
 3. Add that line to `umbra_outside_relays` in `group_vars/all.yml`, and run
    `ansible-playbook site.yml`. An entry relay carries its address, which
-   the firewall of the two gateways then lets in.
+   the firewall of the two gateways then lets in. The run takes the request
+   of each admitted relay out of the inbox.
+
+To refuse a relay, run `ansible-playbook inbox.yml -e refuse=<relay_id>`.
+The relay then learns of the refusal at its next start, and the intake
+takes no request of that key.
+
+The intake compares the AS number of a request with a table from
+`umbra_as_table_url`, which the signer server fetches each week. The
+country of that table is the country of the provider, thus check the
+country of the dossier yourself. The inbox holds 500 requests at most, and
+one address sends 6 requests in an hour at most.
 
 The signer writes the relay as an `outside_relay` line, thus it is never a
 relay of the own operator. The next root lists it as pending at class 0.

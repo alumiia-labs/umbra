@@ -47,7 +47,9 @@ a relay. An entry relay needs a certificate of a public authority: set
    ```
 
 2. Copy the settings file, and fill it in. Each line of `relay.env.example`
-   has its explanation.
+   has its explanation. A middle relay needs three values: a name, your
+   operator name, and a contact address. The network tells the relay its
+   address and the AS number of your provider.
 
    ```sh
    cp deploy/relay/relay.env.example .env
@@ -63,7 +65,19 @@ a relay. An entry relay needs a certificate of a public authority: set
    When `pull` reports `denied` or `not found`, no image of this version is
    published yet. Then run `docker compose build`.
 
-4. Start the relay.
+4. Run the checks. The relay must not run during this step.
+
+   ```sh
+   docker compose run --rm relay preflight
+   ```
+
+   The command prints one line for each check: the address that the network
+   sees, the clock, the permission for the port, the memory, and a
+   connection from the network to your port. Correct each `FAIL` line
+   before you go on. A port that does not reach the machine is the most
+   frequent fault: forward it on your router, and open it in the firewall.
+
+5. Start the relay.
 
    ```sh
    docker compose up -d
@@ -71,19 +85,28 @@ a relay. An entry relay needs a certificate of a public authority: set
    ```
 
    The relay makes its keys one time, gets or makes its certificate, and
-   signs its descriptor. Until the network admits it, the log says that no
-   manifest gives this relay a place. That is correct.
+   signs its descriptor. Then it sends its join request to the network by
+   itself, and the log says so. The request holds your descriptor and the
+   facts of the dossier of Part 10 §10.6. Until the network admits the
+   relay, the log says that no manifest gives this relay a place. That is
+   correct. The relay asks again each 10 minutes, and each time the log
+   says what the network holds: the request, a refusal, or nothing.
 
-5. Make the join request.
+When the log says that the network did not take the request, it gives the
+cause. You can then give the request by hand:
 
-   ```sh
-   docker compose run --rm relay join
-   ```
+```sh
+docker compose run --rm relay join
+```
 
-   The command prints a block of text. Open a
-   [relay request](https://github.com/alumiia-labs/umbra/issues/new?template=relay.yml)
-   on GitHub, and paste the block into it. The request holds your descriptor
-   and the facts of the dossier of Part 10 §10.6.
+The command prints a block of text. Open a
+[relay request](https://github.com/alumiia-labs/umbra/issues/new?template=relay.yml)
+on GitHub, and paste the block into it.
+
+The country that the network states is the country of your provider. When
+the machine is in another country, set `UMBRA_COUNTRY`. A relay with a
+dynamic address gets a new descriptor when its address changes, and it
+sends a new request. The owner of the network then admits the new address.
 
 ## After the request
 

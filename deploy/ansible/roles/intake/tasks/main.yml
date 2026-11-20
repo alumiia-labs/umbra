@@ -1,0 +1,99 @@
+# The intake of the directory (Part 10 §10.6.4), on the server of the
+# signer. It tells a relay its own address, tests its port, and takes its
+# join request into an inbox. nginx of the signer role carries it. It runs
+# under a user of its own, and it reads no file of the signer.
+
+- name: The user of the intake is there
+  ansible.builtin.user:
+    name: umbra-intake
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/umbra-intake
+    create_home: true
+
+- name: The directories of the intake are there
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: umbra-intake
+    group: umbra-intake
+    mode: "0750"
+  loop:
+    - /var/lib/umbra-intake
+    - /var/lib/umbra-intake/inbox
+    - /var/lib/umbra-intake/table
+
+- name: The binary of the intake that runs now stays as umbra-intake.prev
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: binary
+  vars:
+    umbra_binary: umbra-intake
+
+- name: The binary of the intake is there
+  ansible.builtin.copy:
+    src: "{{ umbra_bin_dir }}/umbra-intake"
+    dest: /usr/local/bin/umbra-intake
+    mode: "0755"
+  notify: Restart the intake
+
+- name: The settings of the intake are there
+  ansible.builtin.template:
+    src: intake.conf.j2
+    dest: /etc/umbra-intake.conf
+    mode: "0644"
+  notify: Restart the intake
+
+- name: The units of the intake are there
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - umbra-intake.service
+    - umbra-as-table.service
+    - umbra-as-table.timer
+  notify: Restart the intake
+
+- name: The intake runs
+  ansible.builtin.systemd:
+    name: umbra-intake.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# The table of the address ranges of each autonomous system. With no
+# address in umbra_as_table_url the intake has no table: it states the
+# address of a relay alone, and it compares no AS number.
+- name: The timer of the AS table runs each week
+  ansible.builtin.systemd:
+    name: umbra-as-table.timer
+    enabled: "{{ umbra_as_table_url | length > 0 }}"
+    state: "{{ 'started' if umbra_as_table_url | length > 0 else 'stopped' }}"
+    daemon_reload: true
+
+- name: The first AS table is there
+  ansible.builtin.command:
+    cmd: systemctl start umbra-as-table.service
+    creates: /var/lib/umbra-intake/table/ip2asn-v4.tsv
+  when: umbra_as_table_url | length > 0
+  # A failed download leaves the intake with no table, and the timer tries
+  # again.
+  failed_when: false
+
+# The owner admitted these relays, thus their requests wait no more. The
+# relay_id is the 32 bytes after the version byte of a descriptor.
+- name: The request of each admitted relay leaves the inbox
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      for file in /etc/umbra-signer/descriptors/*.desc; do
+          [ -e "$file" ] || continue
+          id=$(od -An -tx1 -j1 -N32 "$file" | tr -d ' \n')
+          if [ -e "/var/lib/umbra-intake/inbox/$id.request" ]; then
+              rm -f "/var/lib/umbra-intake/inbox/$id.request"
+              echo "removed $id"
+          fi
+      done
+  register: umbra_inbox_clean
+  changed_when: "'removed' in umbra_inbox_clean.stdout"

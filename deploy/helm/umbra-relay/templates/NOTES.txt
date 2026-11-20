@@ -11,14 +11,17 @@ and no port 80. The other relays know it by the hash of that certificate.
 A pod in ImagePullBackOff has no published image of this version:
 deploy/relay/README.md, "The image on Kubernetes", gives the build.
 
-1. Read its log until it signed its descriptor:
+1. Read its log. The relay signs its descriptor, and it sends its join
+   request to the network by itself:
 
      kubectl logs -f deploy/{{ .Release.Name }}
 
-2. Make the join request, and paste it into a relay request on GitHub
+2. When the log says that the network did not take the request, make the
+   request by hand, and paste it into a relay request on GitHub
    (deploy/relay/README.md, "Steps"):
 
      kubectl exec deploy/{{ .Release.Name }} -- umbra-entry join
 
 Until the network admits the relay, it stops at each start and waits 10
-minutes. That is correct.
+minutes. That is correct. Each time, the log says what the network holds:
+the request, a refusal, or nothing.

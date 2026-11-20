@@ -29,18 +29,22 @@ relay:
   # relay alone. Empty for a middle or an exit relay: the relay then makes
   # its own certificate, and it needs no name, no certbot, and no port 80.
   host: ""
-  # The public IPv4 address of the node.
+  # The public IPv4 address of the node. Empty: the network tells the
+  # relay the address that it sees.
   address: ""
   # An entry relay takes 443, which needs
   # net.ipv4.ip_unprivileged_port_start=443 on the node.
   port: 9443
 
-# The facts of the dossier (Part 10 §10.6), for the join request.
+# The facts of the dossier (Part 10 §10.6), for the join request. With a
+# contact, the relay sends its join request to the network by itself.
 operator: ""
 contact: ""
-# ISO 3166-1 alpha-2, as DE or US.
+# ISO 3166-1 alpha-2, as DE or US. Empty: the network states the country
+# of your provider. Set it when the node is in another country.
 country: ""
-# The number of the autonomous system of your provider.
+# The number of the autonomous system of your provider. Empty: the network
+# states it for the address.
 asn: ""
 # Empty: no family. Two relays or more of yours: one value from
 # `openssl rand -hex 32` for each.

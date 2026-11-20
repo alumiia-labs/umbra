@@ -56,7 +56,13 @@
 //! umbra-relay keygen                            # a new identity
 //! umbra-relay descriptor <settings>             # the line of this relay for a client
 //! umbra-relay sign-descriptor <settings> <file> # the descriptor for the authorities
+//! umbra-relay hold-port <port> <seconds>        # an open port for a test from outside
 //! ```
+//!
+//! The `hold-port` form accepts each connection on the port for the stated
+//! time and reads nothing from it. The intake of the network then tests
+//! that the port reaches this machine, before the relay has a place
+//! (Part 10 §10.6.4).
 //!
 //! The `sign-descriptor` form reads `public`, `country` and `asn`, and also
 //! `family=<64 hex characters>`, `class=<0 to 3>` and
@@ -122,7 +128,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), deny(clippy::arithmetic_side_effects))]
 
-use std::{collections::BTreeMap, process::ExitCode};
+use std::{collections::BTreeMap, process::ExitCode, time::Duration};
 
 use tokio::net::TcpListener;
 use umbra_core::directory::{
@@ -636,6 +642,35 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
 /// Prints a new identity for a settings file. The secrets show on the
 /// terminal of the operator one time, and no file of this program holds
 /// them.
+/// The longest time that `hold-port` keeps a port.
+const HOLD_PORT_MOST: u64 = 120;
+
+/// Accepts each connection on `port` for `seconds`, and reads nothing.
+async fn hold_port(port: &str, seconds: &str) -> ExitCode {
+    let (Ok(port), Ok(seconds)) = (port.parse::<u16>(), seconds.parse::<u64>()) else {
+        eprintln!("usage: umbra-relay hold-port <port> <seconds>");
+        return ExitCode::from(2);
+    };
+
+    let Ok(listener) = tokio::net::TcpListener::bind(("0.0.0.0", port)).await else {
+        eprintln!(
+            "the port {port} cannot be bound: another program holds it, or it needs a permission"
+        );
+        return ExitCode::from(1);
+    };
+
+    let hold = async {
+        loop {
+            // The connection closes here, and its sender learns that the port is open.
+            let _ = listener.accept().await;
+        }
+    };
+    let time = Duration::from_secs(seconds.min(HOLD_PORT_MOST));
+    let _ = tokio::time::timeout(time, hold).await;
+
+    ExitCode::SUCCESS
+}
+
 fn keygen() -> ExitCode {
     let mut identity_seed = Zeroizing::new([0u8; 32]);
     let mut static_secret = Zeroizing::new([0u8; 32]);
@@ -840,11 +875,12 @@ async fn run() -> ExitCode {
 
     let path = match arguments.as_slice() {
         ["keygen"] => return keygen(),
+        ["hold-port", port, seconds] => return hold_port(port, seconds).await,
         ["descriptor", path] | ["sign-descriptor", path, _] | [path] => *path,
         _ => {
             eprintln!(
                 "usage: umbra-relay <settings file> | keygen | descriptor <settings file> \
-                 | sign-descriptor <settings file> <descriptor file>"
+                 | sign-descriptor <settings file> <descriptor file> | hold-port <port> <seconds>"
             );
             return ExitCode::from(2);
         }

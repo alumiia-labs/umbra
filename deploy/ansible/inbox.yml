@@ -1,0 +1,53 @@
+# The join requests that wait in the inbox of the intake (Part 10 §10.6.4).
+#
+#   ansible-playbook inbox.yml                        # fetch each request
+#   ansible-playbook inbox.yml -e refuse=<relay_id>   # refuse one relay
+#
+# The first form copies each request to build/inbox/<relay_id>.request.
+# Check the dossier of a request (Part 10 REL-012), then give the file to
+# scripts/relay-admit.py. The run of site.yml that admits the relay takes
+# its request out of the inbox.
+#
+# The second form tells the relay that the owner refused it. The intake
+# then takes no request of that relay.
+
+- name: The inbox of the intake
+  hosts: signer
+  become: true
+  gather_facts: false
+  vars:
+    refuse: ""
+  tasks:
+    - name: The relay_id of a refusal is 64 hex characters
+      ansible.builtin.assert:
+        that: refuse | length == 0 or refuse is match('^[0-9a-f]{64}$')
+        fail_msg: "refuse takes the relay_id of a request: 64 hex characters"
+
+    - name: The relay is refused
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          cd /var/lib/umbra-intake/inbox
+          install -o umbra-intake -g umbra-intake -m 0600 /dev/null "{{ refuse }}.refused"
+          rm -f "{{ refuse }}.request"
+      when: refuse | length > 0
+      changed_when: true
+
+    - name: The requests that wait
+      ansible.builtin.find:
+        paths: /var/lib/umbra-intake/inbox
+        patterns: "*.request"
+      register: umbra_inbox
+
+    - name: Each request goes to this machine
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ umbra_out }}/inbox/"
+        flat: true
+      loop: "{{ umbra_inbox.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: The count of the requests
+      ansible.builtin.debug:
+        msg: "{{ umbra_inbox.files | length }} request(s) wait in {{ umbra_out }}/inbox"

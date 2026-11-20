@@ -36,6 +36,17 @@ umbra_family: ""                     # FILL
 #   - { name: home-2, role: entry, class: 1, operator: bob, address: 198.51.100.7 }
 umbra_outside_relays: []
 
+# The intake (Part 10 §10.6.4) tells a relay of another operator its
+# address and its AS number, tests its port, and takes its join request.
+# It listens on this port of the signer server, on loopback, behind nginx.
+umbra_intake_port: 7460
+
+# The table of the address ranges of each autonomous system, as a gzip
+# file with the columns of iptoasn.com (public domain). The signer server
+# fetches it each week. With an empty value the intake has no table: it
+# states the address of a relay alone, and it compares no AS number.
+umbra_as_table_url: https://iptoasn.com/data/ip2asn-v4.tsv.gz
+
 # The directory of the Linux binaries on this machine, which
 # scripts/build-linux.sh writes.
 umbra_bin_dir: "{{ playbook_dir }}/../../target/deploy/bin"

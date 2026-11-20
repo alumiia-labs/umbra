@@ -7,9 +7,6 @@
 {{- if not (has $relay.role (list "middle" "exit" "entry")) }}
 {{- fail "relay.role: middle, exit or entry" }}
 {{- end }}
-{{- if not $relay.address }}
-{{- fail "relay.address: the public IPv4 address of the relay" }}
-{{- end }}
 {{- /* Part 10 REL-226: a phone verifies the certificate of an entry relay
        against its name. */ -}}
 {{- if and (eq $relay.role "entry") (not $relay.host) }}

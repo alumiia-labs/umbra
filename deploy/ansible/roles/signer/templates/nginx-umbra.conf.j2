@@ -1,5 +1,6 @@
 # Written by Ansible (deploy/ansible/roles/signer). The HTTPS carrier of
-# Part 3 §3.10: the manifest alone, with no log of who fetched it. Before
+# Part 3 §3.10: the manifest, with no log of who fetched it, and the intake
+# of Part 10 §10.6.4. Before
 # the first rotation of the key set no key chain exists, and each request
 # for it gets 404 (Part 10 REL-199). The error log would then hold the
 # address of each app and each relay that asked, thus it is off too.
@@ -27,6 +28,20 @@ server {
     location = /.well-known/umbra/keychain {
         default_type application/octet-stream;
         add_header Cache-Control "no-cache" always;
+    }
+
+    # Part 10 §10.6.4: the intake, for a relay that wants to join. The
+    # intake takes the address of the relay from this header alone, and
+    # nginx sets it over a header of the same name in the request.
+    location ~ ^/\.well-known/umbra/(whoami|join|join/[0-9a-f]+|reach/[0-9]+)$ {
+        limit_except GET POST {
+            deny all;
+        }
+        client_max_body_size 16k;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 20s;
+        proxy_pass http://127.0.0.1:{{ umbra_intake_port }};
     }
 
     location / {

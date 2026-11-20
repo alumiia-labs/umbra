@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.59.0
-**Date:** 2026-11-19
+**Version:** 0.60.0
+**Date:** 2026-11-20
 
 ---
 
@@ -2005,6 +2005,50 @@ it orders the blocs by their first code. The list of §10.12 is 66 bytes.
 > constraint that no client can read. §10.12 holds the list, `bloc_hash` puts
 > it under the root, and the floor states when the list is one that a client
 > can satisfy.
+
+### 10.6.4 The intake of a join request
+
+An operator who wants to join needs three facts for its descriptor that a
+machine at home does not know: its public IPv4 address, the ASN of that
+address, and the jurisdiction. It also needs a way to give its request to the
+directory. A directory MAY run an **intake** for these needs. The intake is a
+service of the directory with four functions:
+
+1. It states the address that a request came from, and the ASN and the
+   country of that address from a table of the address ranges of each
+   autonomous system.
+2. It connects one time to a port of the address that a request came from, and
+   it states whether the port is open. An operator thus finds a missing port
+   forward before the first start.
+3. It takes a join request: the signed descriptor of the relay, and the
+   dossier facts of §10.6 that the operator states.
+4. It states whether a request of a `relay_id` waits, or whether the directory
+   refused that relay.
+
+The intake decides no admission. A request that it takes waits for the
+dossier check of `REL-012`.
+
+- **[REL-230]** An intake MUST NOT hold a key of a directory authority, and it
+  MUST NOT add a relay to a root.
+- **[REL-231]** An intake MUST refuse a join request whose descriptor states
+  another `addr_v4` than the address that the request came from. A party thus
+  cannot fill the queue of the directory with requests for addresses that it
+  does not hold.
+- **[REL-232]** An intake MUST refuse a join request whose descriptor fails
+  `REL-050` or `REL-051`, and one whose descriptor states another ASN than its
+  table gives for the address, when the table holds the address.
+- **[REL-233]** An intake MUST bound the requests that it takes from one
+  address in a period, and the count of the requests that wait.
+- **[REL-234]** An intake MUST connect, in the port test, to the address that
+  the request came from alone, and it MUST send no byte on that connection.
+
+The country of the table is the country of the registry entry of the
+autonomous system. The machine can be in another country. An operator states
+the jurisdiction of the machine when the two differ, and the directory checks
+that fact with the dossier.
+
+The intake sees the address of each relay that asks. Each such address is in a
+public descriptor after the admission. No client asks the intake.
 
 ## 10.7 Sybil defense
 

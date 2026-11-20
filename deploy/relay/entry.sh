@@ -3,8 +3,9 @@
 # time, writes its settings file from the environment, and starts it.
 #
 #   umbra-entry init     # as root: the directories and their owners
-#   umbra-entry relay    # the relay
-#   umbra-entry join     # the join request of the relay
+#   umbra-entry relay      # the relay
+#   umbra-entry join       # the join request of the relay, as text
+#   umbra-entry preflight  # the checks before the first start
 #
 # deploy/relay/relay.env.example names each variable. The keys never leave
 # the state directory.
@@ -13,6 +14,11 @@
 # makes its own link certificate in the state directory, and it needs no
 # DNS name, no certbot, and no port 80. An entry relay has a host, because
 # phones verify its certificate against that name.
+#
+# The intake of the network (Part 10 §10.6.4) tells a relay its address,
+# its AS number, and the country of that AS, for each of the three that the
+# environment does not set. The relay sends its join request to the intake
+# by itself. The owner of the network still decides on it.
 set -euo pipefail
 umask 077
 
@@ -66,6 +72,67 @@ network_values() {
         name=${line%%=*}
         [ -n "${!name:-}" ] || export "$line"
     done < "$NETWORK/network.env"
+}
+
+# One request to the intake of the network, which the server of the signer
+# carries. The answer holds `name=value` lines.
+signer_ask() {
+    local path=$1 host ip port
+    shift
+    IFS=, read -r host ip port <<< "$UMBRA_SIGNER"
+    curl -sS --max-time 30 --proto =https --tlsv1.3 --resolve "$host:$port:$ip" \
+        "$@" "https://$host:$port/.well-known/umbra/$path"
+}
+
+# The value of one line of an answer, when it has the form of the pattern.
+# An answer is not trusted: a value of another form is no value.
+value_of() {
+    local name=$1 pattern=$2 text=$3 value
+    value=$(sed -n "s/^$name=//p" <<< "$text" | head -n 1)
+    [[ "$value" =~ ^$pattern$ ]] && echo "$value"
+}
+
+# The address, the AS number, and the country that the environment does not
+# set come from the intake: it states the address that this machine shows
+# to the network. The last answer stays in the state directory, thus a
+# start with no answer still has its values.
+learn_public() {
+    UMBRA_PUBLIC_ADDRESS=${UMBRA_PUBLIC_ADDRESS:-}
+    UMBRA_ASN=${UMBRA_ASN:-}
+    UMBRA_COUNTRY=${UMBRA_COUNTRY:-}
+    if [ -n "$UMBRA_PUBLIC_ADDRESS" ] && [ -n "$UMBRA_ASN" ] && [ -n "$UMBRA_COUNTRY" ]; then
+        return 0
+    fi
+
+    local answer file="$STATE/whoami" address asn country
+    if answer=$(signer_ask whoami -f 2>/dev/null) && grep -q '^address=' <<< "$answer"; then
+        echo "$answer" > "$file"
+    elif [ -s "$file" ]; then
+        say "the network gives no answer: the address of the last start stays"
+        answer=$(cat "$file")
+    else
+        die "the network does not tell this relay its address: set UMBRA_ADDRESS, UMBRA_ASN and UMBRA_COUNTRY, or try again later"
+    fi
+
+    address=$(value_of address '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$answer") || true
+    asn=$(value_of asn '[0-9]{1,10}' "$answer") || true
+    country=$(value_of country '[A-Z]{2}' "$answer") || true
+
+    if [ -n "$UMBRA_PUBLIC_ADDRESS" ] && [ -n "$address" ] && [ "$UMBRA_PUBLIC_ADDRESS" != "$address" ]; then
+        say "UMBRA_ADDRESS is $UMBRA_PUBLIC_ADDRESS, and the network sees this machine at $address"
+    fi
+    UMBRA_PUBLIC_ADDRESS=${UMBRA_PUBLIC_ADDRESS:-$address}
+    UMBRA_ASN=${UMBRA_ASN:-$asn}
+    UMBRA_COUNTRY=${UMBRA_COUNTRY:-$country}
+
+    [ -n "$UMBRA_PUBLIC_ADDRESS" ] || die "the answer of the network holds no address: set UMBRA_ADDRESS"
+    [ -n "$UMBRA_ASN" ] ||
+        die "the network does not know the autonomous system of $UMBRA_PUBLIC_ADDRESS: set UMBRA_ASN (whois names it)"
+    [ -n "$UMBRA_COUNTRY" ] ||
+        die "the network does not know the country of $UMBRA_PUBLIC_ADDRESS: set UMBRA_COUNTRY"
+    # The country is the one of the provider. A machine in another country
+    # states its own in UMBRA_COUNTRY.
+    say "this relay: address $UMBRA_PUBLIC_ADDRESS, AS$UMBRA_ASN, country $UMBRA_COUNTRY"
 }
 
 # Docker and Kubernetes give a user with no root no capability, thus a port
@@ -150,6 +217,8 @@ make_keys() {
 
 relay_conf() {
     network_values
+    need UMBRA_SIGNER
+    learn_public
     need UMBRA_RELAY_NAME UMBRA_RELAY_ROLE UMBRA_RELAY_CLASS \
         UMBRA_PUBLIC_ADDRESS UMBRA_PUBLIC_PORT UMBRA_OPERATOR UMBRA_COUNTRY UMBRA_ASN \
         UMBRA_FAMILY UMBRA_SIGNER
@@ -266,7 +335,7 @@ relay_descriptor() {
     mv "$STATE/relay.desc.part" "$STATE/relay.desc"
     descriptor_sum > "$STATE/relay.desc.sum"
     chmod 0644 "$STATE/relay.desc"
-    say "signed a new descriptor: run join, and give the request to the network"
+    say "signed a new descriptor"
 }
 
 fetch_manifest() {
@@ -281,6 +350,7 @@ relay_run() {
     relay_conf
     memory_check
     relay_descriptor
+    relay_announce
 
     # The key set is the root of trust of the relay, thus it comes from the
     # image and not from the network. A rotation later writes a newer one.
@@ -313,18 +383,25 @@ relay_run() {
     if [ "$status" -ne 0 ] && [ $(($(date +%s) - started)) -lt 90 ]; then
         local wait=${UMBRA_ADMISSION_WAIT:-600}
         say "the relay stopped at its start; a relay that waits for its admission stops so. Next try in $wait s"
+        relay_announce again
         nap "$wait"
     fi
     return "$status"
 }
 
-# The request that the operator gives to the network: the signed descriptor
-# and the facts of the dossier (Part 10 §10.6). Each value is public.
-relay_join() {
-    need UMBRA_CONTACT
+relay_id_of() {
     local relay_id
     relay_id=$(umbra-relay descriptor "$RUN/relay.conf" | cut -d' ' -f6)
     [[ "$relay_id" =~ ^[0-9a-f]{64}$ ]] || die "the relay_id does not read from the settings"
+    echo "$relay_id"
+}
+
+# The request that the network gets: the signed descriptor and the facts of
+# the dossier (Part 10 §10.6). Each value is public.
+relay_join() {
+    need UMBRA_CONTACT
+    local relay_id
+    relay_id=$(relay_id_of)
 
     echo "-----BEGIN UMBRA RELAY REQUEST-----"
     echo "name=$UMBRA_RELAY_NAME"
@@ -340,6 +417,123 @@ relay_join() {
     echo "descriptor="
     base64 -w 76 "$STATE/relay.desc"
     echo "-----END UMBRA RELAY REQUEST-----"
+}
+
+# Sends the join request to the intake, one time for each descriptor, and
+# says what the intake holds. The owner of the network decides on the
+# request (Part 10 REL-012). With `again`, a request that the intake holds
+# no more goes there again.
+relay_announce() {
+    local again=${1:-} sum relay_id answer state
+    if [ -z "${UMBRA_CONTACT:-}" ]; then
+        say "set UMBRA_CONTACT, and the relay sends its join request by itself"
+        return 0
+    fi
+    sum=$(cat "$STATE/relay.desc.sum")
+    relay_id=$(relay_id_of)
+
+    if [ "$(cat "$STATE/join.sum" 2>/dev/null)" = "$sum" ]; then
+        answer=$(signer_ask "join/$relay_id" 2>/dev/null) || true
+        state=$(value_of state '[a-z]+' "$answer") || true
+        case $state in
+            received)
+                say "the network holds the join request of this relay, and its owner decides on it"
+                return 0
+                ;;
+            refused)
+                say "the owner of the network refused this relay"
+                return 0
+                ;;
+            unknown) [ "$again" = again ] || return 0 ;;
+            *)
+                say "the network gives no answer about the join request"
+                return 0
+                ;;
+        esac
+    fi
+
+    answer=$(relay_join | signer_ask join --data-binary @- -H 'Content-Type: text/plain' 2>/dev/null) || true
+    state=$(value_of state '[a-z]+' "$answer") || true
+    if [ "$state" = received ]; then
+        echo "$sum" > "$STATE/join.sum"
+        say "sent the join request of this relay to the network; its owner decides on it"
+        return 0
+    fi
+
+    say "the network did not take the join request: $(value_of refused '[ -~]+' "$answer" || echo "no answer")"
+    say "the join command prints the request, which you can give to the network by hand"
+}
+
+# The checks that an operator runs before the first start. Stop the relay
+# before this command: the last check needs the port of the relay.
+relay_preflight() {
+    network_values
+    need UMBRA_SIGNER
+    UMBRA_RELAY_ROLE=${UMBRA_RELAY_ROLE:-middle}
+    local port=${UMBRA_PUBLIC_PORT:-9443} failed=0 answer address remote there here skew pid
+    pass() { say "ok: $*"; }
+    fail() {
+        say "FAIL: $*"
+        failed=1
+    }
+
+    if answer=$(signer_ask whoami -f 2>/dev/null) && address=$(value_of address '[0-9.]+' "$answer"); then
+        pass "the network sees this machine at $address"
+        pass "its autonomous system is AS$(value_of asn '[0-9]+' "$answer" || echo " unknown: set UMBRA_ASN")"
+        pass "the country of that system is $(value_of country '[A-Z]{2}' "$answer" || echo "unknown: set UMBRA_COUNTRY")"
+    else
+        fail "the network gives no answer: check the DNS of this machine, and that it reaches port 443 of other machines"
+    fi
+
+    # A relay with a wrong clock takes no manifest.
+    remote=$(signer_ask manifest -f -I 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p') || true
+    if there=$(date -d "$remote" +%s 2>/dev/null) && [ -n "$remote" ]; then
+        here=$(date +%s)
+        skew=$((here > there ? here - there : there - here))
+        if [ "$skew" -le 30 ]; then
+            pass "the clock is $skew s from the clock of the network"
+        else
+            fail "the clock is $skew s from the clock of the network: start a time service, as chrony"
+        fi
+    else
+        fail "the clock of the network does not read"
+    fi
+
+    if (port_check "$port") 2>/dev/null; then
+        pass "this user can open port $port"
+    else
+        fail "port $port needs net.ipv4.ip_unprivileged_port_start=$port or lower on the host"
+    fi
+
+    if (memory_check) 2>/dev/null; then
+        pass "the memory limit is enough for the role $UMBRA_RELAY_ROLE"
+    else
+        fail "the memory limit is too low for an exit relay: raise UMBRA_MEMORY_MAX"
+    fi
+
+    # The intake connects to the port from outside while this relay holds it.
+    umbra-relay hold-port "$port" 45 &
+    pid=$!
+    nap 2
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "port $port is not free: stop the relay before this check"
+    else
+        answer=$(signer_ask "reach/$port" 2>/dev/null) || true
+        case $(value_of reach '[a-z]+' "$answer" || true) in
+            open) pass "port $port reaches this machine from outside" ;;
+            closed) fail "port $port does not reach this machine from outside: forward it on the router, and open it in the firewall. An address behind carrier-grade NAT does not work" ;;
+            *) fail "the network gave no result for port $port" ;;
+        esac
+        kill "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+
+    if [ "$failed" -eq 0 ]; then
+        say "each check passed: start the relay"
+    else
+        say "correct each FAIL line, and run the preflight again"
+    fi
+    return "$failed"
 }
 
 # The group of TLS_DIR reads the key of the certificate, and the relay user
@@ -361,5 +555,6 @@ case "${1:-}" in
     init) shift && init_dirs "$@" ;;
     relay) relay_run ;;
     join) relay_conf && relay_descriptor && relay_join ;;
+    preflight) relay_preflight ;;
     *) die "unknown command: ${1:-}. See the head of $0." ;;
 esac

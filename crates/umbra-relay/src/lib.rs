@@ -7,7 +7,8 @@
 //! the layer of this relay from a signed relay set. [`node`] ties the two
 //! to the session links of Part 6 §6.2 and to the pacing clock of Part 3 §3.5.2.
 //! [`sybil`] holds the Sybil detection of Part 10 §10.7.2, which the signer
-//! runs over the relay set of each root.
+//! runs over the relay set of each root. [`intake`] holds the checks of a
+//! join request (Part 10 §10.6.4).
 //!
 //! The library takes no socket and draws no random value, and each time of
 //! the wall clock is an argument of a call. A test thus drives three relays
@@ -27,6 +28,9 @@ pub mod directory_server;
 pub mod fcm;
 #[cfg(feature = "sockets-test")]
 pub mod hops;
+pub mod intake;
+#[cfg(feature = "native")]
+pub mod intake_server;
 #[cfg(feature = "native")]
 pub mod issuer_keys;
 #[cfg(feature = "native")]

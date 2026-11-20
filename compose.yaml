@@ -7,8 +7,8 @@
 #
 #   cp deploy/relay/relay.env.example .env    # then fill it in
 #   docker compose pull                       # or: docker compose build
-#   docker compose up -d
-#   docker compose run --rm relay join
+#   docker compose run --rm relay preflight   # the checks before the start
+#   docker compose up -d                      # the relay sends its join request
 #
 # The relay uses the network of the host: it states the address of the host
 # in its descriptor, and it sees the address of each client for its limits.
@@ -23,7 +23,7 @@ name: umbra-relay
 # .env to the name with the digest of the release run:
 # ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>.
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.59.0}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.60.0}
   build:
     context: .
     target: relay

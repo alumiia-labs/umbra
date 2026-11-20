@@ -1,0 +1,10 @@
+# Written by Ansible (deploy/ansible/roles/intake).
+listen=127.0.0.1:{{ umbra_intake_port }}
+inbox=/var/lib/umbra-intake/inbox
+{% if umbra_as_table_url | length > 0 %}
+as_table=/var/lib/umbra-intake/table/ip2asn-v4.tsv
+{% endif %}
+# Part 10 REL-128: a request never makes a relay one of this operator.
+own_operator={{ umbra_operator }}
+# nginx states the address of each client in X-Real-IP.
+behind_proxy=yes

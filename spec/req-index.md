@@ -77,13 +77,13 @@ column when a crate implements the requirement and a test covers it.
 | `DEV` | 228 | 95 | 0 | 0 | 15 | **338** |
 | `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
 | `DIS` | 138 | 38 | 1 | 0 | 3 | **180** |
-| `REL` | 179 | 34 | 1 | 0 | 4 | **218** |
+| `REL` | 183 | 35 | 1 | 0 | 4 | **223** |
 | `GRP` | 245 | 69 | 0 | 0 | 5 | **319** |
 | `ATT` | 153 | 47 | 2 | 0 | 3 | **205** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2194 | 651 | 8 | 0 | 66 | **2919** |
+| **All** | 2198 | 652 | 8 | 0 | 66 | **2924** |
 
 ## SCP — Scope and Conventions
 
@@ -2276,6 +2276,11 @@ Source: `spec/10-relay-directory.md`
 | `REL-227` | §10.5.3 | MUST | A client | A client MUST reject a descriptor in pin form whose `roles` bit 2 is set. |  |  |
 | `REL-228` | §10.5.3 | MUST | A client | A client MUST reject an entry of §10.5.4 whose `flags` bit 0 is set and whose descriptor is in pin form. |  |  |
 | `REL-229` | §10.5.3 | MUST | A relay in pin form | A relay in pin form MUST give the certificate of its pin as the end-entity certificate of each TLS handshake on its listener. |  |  |
+| `REL-230` | §10.6.4 | MUST NOT | An intake | An intake MUST NOT hold a key of a directory authority, and it MUST NOT add a relay to a root. |  |  |
+| `REL-231` | §10.6.4 | MUST | An intake | An intake MUST refuse a join request whose descriptor states another `addr_v4` than the address that the request came from. |  |  |
+| `REL-232` | §10.6.4 | MUST | An intake | An intake MUST refuse a join request whose descriptor fails `REL-050` or `REL-051`, and one whose descriptor states another ASN than its table gives for the address, when the table holds the address. |  |  |
+| `REL-233` | §10.6.4 | MUST | An intake | An intake MUST bound the requests that it takes from one address in a period, and the count of the requests that wait. |  |  |
+| `REL-234` | §10.6.4 | MUST | An intake | An intake MUST connect, in the port test, to the address that the request came from alone, and it MUST send no byte on that connection. |  |  |
 
 ## GRP — Private Groups
 
