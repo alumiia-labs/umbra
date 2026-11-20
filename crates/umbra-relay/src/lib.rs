@@ -6,6 +6,8 @@
 //! pairwise queues, the group queues, and the chunks. [`placement`] reads
 //! the layer of this relay from a signed relay set. [`node`] ties the two
 //! to the session links of Part 6 §6.2 and to the pacing clock of Part 3 §3.5.2.
+//! [`sybil`] holds the Sybil detection of Part 10 §10.7.2, which the signer
+//! runs over the relay set of each root.
 //!
 //! The library takes no socket and draws no random value, and each time of
 //! the wall clock is an argument of a call. A test thus drives three relays
@@ -41,6 +43,7 @@ pub mod service;
 #[cfg(feature = "native")]
 pub mod sqlite_store;
 pub mod store;
+pub mod sybil;
 
 /// The oldest epoch whose issuer key a relay keeps when it takes the key
 /// of `epoch`: the one before the epoch before, since a token names the

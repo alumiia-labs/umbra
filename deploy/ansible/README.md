@@ -279,6 +279,18 @@ manifest of an hour rejects a second one for it. Thus:
     manifest names the measurer, and each relay then refuses it
     (`REL-104`, `REL-105`). Delete the two files of
     `/var/lib/umbra-measurer/keys` before that run, and it makes a new key.
+- **Sybil detection.** With each new manifest the signer adds the relay set
+  to `/var/lib/umbra-signer/state/sybil_history`, which holds 14 days. It
+  then runs the four detectors of Part 10 §10.7.2 over that history.
+  - Each alert is one line of `journalctl -u umbra-signer` that starts with
+    `sybil kind=`. The kinds are `churn`, `uptime`, `similarity`, and
+    `rotation`. The line names the epoch, each `relay_id`, and the cause.
+  - `/var/lib/umbra-signer/state/sybil_alerts` holds the alerts of the last
+    manifest alone. An empty file means that the last manifest gave none.
+  - An alert removes no relay. Read it, examine the relays, and take a
+    relay out of the inventory when the dossier does not explain the alert.
+  - A fault of the detection stops no manifest. The signer moves a history
+    that it cannot read to `sybil_history.unreadable` and starts a new one.
 - **A failed signer run** leaves the old manifest in place, and the network
   stops when that one ends. The unit `umbra-alert@umbra-signer` then writes a
   line of the highest priority to the journal and to each open terminal.

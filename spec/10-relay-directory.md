@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.57.2
+**Version:** 0.58.0
 **Date:** 2026-11-19
 
 ---
@@ -2008,6 +2008,17 @@ The alerts go to a human, but the system **makes them automatically**. In 2026
 the Sybil detection of Tor stays manual, and that is the cause that KAX17
 operated for four years.
 
+The directory keeps the relay set of each root of the last `SYBIL_WINDOW`
+epochs, and the four techniques read that history when a root goes out. An
+alert holds its technique, the epoch of the root, the `relay_id` of each relay
+that it names, and one line that states the cause. An alert removes no relay.
+§10.11 gives each threshold. The churn threshold of one state (pending, placed,
+or ingress) is `SYBIL_CHURN_SHARE` of the relay set, and `SYBIL_CHURN_FLOOR`
+at the least. The uptime technique and the Levenshtein technique give no alert
+for relays of one `operator_id` or one `family_id`, because that control is
+declared. The Levenshtein technique reads `host`, the one descriptor field of
+free text.
+
 Add active probing with loop cover. Six of the Sybil groups in the USENIX 2016
 study were invisible to a passive descriptor analysis.
 
@@ -2194,6 +2205,16 @@ relay with the notification role, and this section then applies to it.
 | Ingress rotation | 60 d confirmed, 120 d unconfirmed |
 | Ingress eligibility | class ≥ C1, and `flags` bit 0 of the entry carries it (§10.5.3) |
 | Staging period | 4 d chain and queue, 14 d ingress |
+| `SYBIL_WINDOW` | 336 epochs (14 days) of relay sets that the Sybil detection reads: the ingress staging (§10.7.2) |
+| `SYBIL_CHURN_SHARE` | 1 % of the relay set that takes or loses one state in one epoch (§10.7.2) |
+| `SYBIL_CHURN_FLOOR` | 3 relays, the lowest churn threshold (§10.7.2) |
+| `SYBIL_UPTIME_CHANGES` | 4 state changes of one relay in the window, before the uptime technique reads it (§10.7.2) |
+| `SYBIL_UPTIME_CORRELATION` | 0.9, the lowest Pearson correlation of two relays of one group (§10.7.2) |
+| `SYBIL_UPTIME_RELAYS` | 256 relays that the uptime technique compares in one epoch (§10.7.2) |
+| `SYBIL_NEAR_DISTANCE` | 0.2, the largest Levenshtein distance of two host names as a part of the longer name (§10.7.2) |
+| `SYBIL_NEAR_COUNT` | 3 nearest relays in one alert (§10.7.2) |
+| `SYBIL_NEAR_NEW` | 64 new relays that the Levenshtein technique compares in one epoch (§10.7.2) |
+| `SYBIL_ROTATION_IDS` | 3 identities of one address in the window: 2 that left and a new one (§10.7.2) |
 | Family / ASN ceiling | 3 % or one relay / 10 %, of one population of one bloc (§10.6) |
 | `BLOC_MIN` | 3 blocs at the feasibility floor (§10.6.3) |
 | `BLOC_LAYER_SHARE` | 10 % of the ingress population and of the chain population (§10.6.3) |

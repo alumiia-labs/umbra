@@ -27,8 +27,9 @@
     - { path: /etc/umbra-signer, owner: root, mode: "0755" }
     - { path: /etc/umbra-signer/descriptors, owner: root, mode: "0755" }
     - { path: /var/www/umbra/.well-known/umbra, owner: umbra-signer, mode: "0755" }
-    # The listed class of each relay (REL-001) and the first pending root
-    # of each relay of another operator (REL-156), which the signer writes.
+    # The listed class of each relay (REL-001), the first pending root of
+    # each relay of another operator (REL-156), and the history and the
+    # alerts of the Sybil detection (§10.7.2), which the signer writes.
     - { path: /var/lib/umbra-signer/state, owner: umbra-signer, mode: "0755" }
 
 - name: The binary of the signer that runs now stays as umbra-signer.prev

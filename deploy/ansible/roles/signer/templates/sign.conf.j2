@@ -28,6 +28,10 @@ verdicts=/var/lib/umbra-authority/verdicts
 # each relay with the epoch of its last step up (Part 10 REL-001).
 results=/var/lib/umbra-measurer/results
 class_state=/var/lib/umbra-signer/state/class_state
+# Part 10 §10.7.2: the relay set of each root of the last 14 days, and the
+# Sybil alerts of the last root. The journal takes each alert too.
+sybil_history=/var/lib/umbra-signer/state/sybil_history
+sybil_alerts=/var/lib/umbra-signer/state/sybil_alerts
 {% for measurer in umbra_revoked_measurers %}
 revoked={{ measurer.id }},{{ measurer.not_after }}
 {% endfor %}

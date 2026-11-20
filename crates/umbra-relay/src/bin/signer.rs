@@ -46,6 +46,8 @@
 //! class_state=<file of the listed classes>
 //! admission_state=<file of the pending roots>
 //! revoked=<measurer_id in hex>,<not_after epoch>
+//! sybil_history=<file of the observed relay sets>
+//! sybil_alerts=<file of the alerts of the last root>
 //! ```
 //!
 //! `measurer-cert` issues the `MeasurerCert` of the public key in the
@@ -161,6 +163,16 @@
 //! file change only when a root goes out, thus a pending root in the file is
 //! a published one.
 //!
+//! The `sybil_history` line starts the Sybil detection of Part 10 §10.7.2.
+//! When a root goes out, the signer adds the relay set of that root to the
+//! history file, and it drops each set older than `SYBIL_WINDOW`. The four
+//! detectors of `umbra_relay::sybil` then read the history. The standard
+//! error takes one line for each alert, and the `sybil_alerts` file takes
+//! the alerts of this root alone. An alert goes to a person, and the signer
+//! removes no relay for it. A fault of the detection stops no manifest. The
+//! signer moves a history file that does not parse to the same name with
+//! `.unreadable`, and it starts a new history.
+//!
 //! A relay with the attachment role declares `CHUNK_STORE_MIN` or more
 //! (Part 12 `ATT-088`). The bootstrap period of Part 3 `NET-340` relaxes
 //! that floor: under a provisional directory a relay may declare less. This
@@ -194,7 +206,10 @@ use umbra_core::directory::{
 use umbra_crypto::{
     hash::sha3_256, hex, rand_core::TryRng, secret::Secret, sign::SigningKey, zeroize::Zeroizing,
 };
-use umbra_relay::server::OsRng;
+use umbra_relay::{
+    server::OsRng,
+    sybil::{self, Observation, Observed},
+};
 
 /// The epoch of the first key set.
 const FIRST_KEYSET_EPOCH: u64 = 1;
@@ -1120,6 +1135,68 @@ fn say_left_out(relay: &Admitted, cause: &str) {
     );
 }
 
+/// The relay set of `manifest`, as the Sybil detection observes it.
+fn observation_of(manifest: &RelayManifest<'_>, epoch: u64) -> Observation {
+    let relays = manifest
+        .entries
+        .iter()
+        .filter_map(|proven| RelayEntry::parse(proven.entry).ok())
+        .map(|entry| Observed::of(&entry))
+        .collect();
+
+    Observation { epoch, relays }
+}
+
+/// Runs the Sybil detection of Part 10 §10.7.2 for the root that went out.
+/// It adds `observation` to the history file, says each alert on the
+/// standard error, and writes the alerts of this root to `alerts_file`.
+fn watch_for_sybils(
+    history_file: &Path,
+    alerts_file: Option<&Path>,
+    observation: Observation,
+) -> Result<(), &'static str> {
+    // A file that does not exist yet holds no observation.
+    let text = std::fs::read_to_string(history_file).unwrap_or_default();
+
+    let mut history = match sybil::read_history(&text) {
+        Some(history) => history,
+        None => {
+            // A person can still read the old file, and the detection
+            // starts again in this epoch.
+            std::fs::rename(history_file, history_file.with_extension("unreadable"))
+                .map_err(|_| "the Sybil history does not parse, and the file does not move")?;
+            eprintln!(
+                "{}: the Sybil history does not parse; a new history starts, \
+                 and the old file has the extension .unreadable",
+                history_file.display()
+            );
+            Vec::new()
+        }
+    };
+
+    sybil::record(&mut history, observation);
+    write_whole(
+        history_file,
+        sybil::history_text(&history).as_bytes(),
+        false,
+    )?;
+
+    let lines: Vec<String> = sybil::detect(&history)
+        .iter()
+        .map(sybil::Alert::line)
+        .collect();
+    for line in &lines {
+        eprintln!("{line}");
+    }
+
+    if let Some(path) = alerts_file {
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        write_whole(path, text.as_bytes(), false)?;
+    }
+
+    Ok(())
+}
+
 fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1143,6 +1220,8 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
     let mut own_operator: Option<[u8; 32]> = None;
     let mut admission_state_file: Option<PathBuf> = None;
     let mut revoked: Vec<([u8; 16], u64)> = Vec::new();
+    let mut sybil_history_file: Option<PathBuf> = None;
+    let mut sybil_alerts_file: Option<PathBuf> = None;
 
     for line in text
         .lines()
@@ -1192,6 +1271,8 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
             Some(("class_state", value)) => class_state_file = Some(PathBuf::from(value)),
             Some(("own_operator", value)) => own_operator = Some(operator_id_of(value)),
             Some(("admission_state", value)) => admission_state_file = Some(PathBuf::from(value)),
+            Some(("sybil_history", value)) => sybil_history_file = Some(PathBuf::from(value)),
+            Some(("sybil_alerts", value)) => sybil_alerts_file = Some(PathBuf::from(value)),
             Some(("revoked", value)) => {
                 let (id, not_after) = value
                     .split_once(',')
@@ -1217,6 +1298,9 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
 
     let key_dir = key_dir.ok_or("the settings file needs a line: keys=<key directory>")?;
     let out = out.ok_or("the settings file needs a line: out=<output directory>")?;
+    if sybil_alerts_file.is_some() && sybil_history_file.is_none() {
+        return Err("a sybil_alerts line needs a line: sybil_history=<file of the relay sets>");
+    }
 
     let (keys, keyset) = read_keys(&key_dir)?;
     let (parsed, _) = DirectoryKeySet::parse(&keyset).map_err(|_| "keyset.bin does not parse")?;
@@ -1529,6 +1613,15 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
         )?;
     }
 
+    // §10.7.2: the history holds published relay sets alone, as the two
+    // state files do. The root is out, thus a fault here stops nothing.
+    if let Some(path) = &sybil_history_file {
+        let observation = observation_of(&parsed, epoch);
+        if let Err(cause) = watch_for_sybils(path, sybil_alerts_file.as_deref(), observation) {
+            eprintln!("the Sybil detection did not run: {cause}");
+        }
+    }
+
     println!(
         "epoch={epoch} relays={} manifest={} bytes report_queues={} removed_links={}",
         relays.len(),
@@ -1829,6 +1922,65 @@ mod tests {
         read_admission_state(
             &std::fs::read_to_string(home.join("admission_state")).unwrap_or_default(),
         )
+    }
+
+    #[test]
+    fn a_history_that_does_not_parse_stops_no_manifest() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let (own_line, own_id) = relay_line(&home, 1, chain_roles, "home", "exit");
+            let (history_file, alerts_file) = (home.join("sybil_history"), home.join("alerts"));
+            let history_line = format!("sybil_history={}", history_file.display());
+            let alerts_line = format!("sybil_alerts={}", alerts_file.display());
+            let settings = write_settings(&home, &[&own_line, &history_line, &alerts_line]);
+            let first = 500_000;
+            write_results(&home, &[], first);
+            let history_in =
+                || sybil::read_history(&std::fs::read_to_string(&history_file).unwrap()).unwrap();
+
+            std::fs::write(&history_file, "epoch 7\nno relay line\n").unwrap();
+            std::fs::write(&alerts_file, "an alert of an earlier root\n").unwrap();
+            sign_at(&settings, false, at(first)).unwrap();
+
+            // The root is out, the old file stays for a person, and a new
+            // history holds the relay set of this root.
+            assert!(published_in(&home).0.contains_key(&own_id));
+            let set_aside = std::fs::read_to_string(home.join("sybil_history.unreadable"));
+            assert_eq!(set_aside.unwrap(), "epoch 7\nno relay line\n");
+            let history = history_in();
+            let [observation] = history.as_slice() else {
+                unreachable!("the history holds {} observations", history.len());
+            };
+            assert_eq!(observation.epoch, first);
+            let ids: Vec<[u8; 32]> = observation.relays.iter().map(|r| r.relay_id).collect();
+            assert_eq!(ids, [own_id]);
+            assert_eq!(std::fs::read_to_string(&alerts_file).unwrap(), "");
+
+            // A run that keeps the root of its epoch adds no observation.
+            sign_at(&settings, false, at(first) + 60).unwrap();
+            assert_eq!(history_in().len(), 1);
+
+            // The next root adds one.
+            sign_at(&settings, false, at(first + 1)).unwrap();
+            assert_eq!(history_in().len(), 2);
+
+            // A history file that takes no bytes stops no manifest either.
+            std::fs::remove_file(&history_file).unwrap();
+            std::fs::create_dir(&history_file).unwrap();
+            sign_at(&settings, false, at(first + 2)).unwrap();
+            let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
+            let manifest = RelayManifest::parse(&bytes).unwrap();
+            assert_eq!(
+                DirectoryRoot::parse(manifest.root).unwrap().epoch,
+                first + 2
+            );
+
+            // An alerts file needs a history.
+            let alone = write_settings(&home, &[&own_line, &alerts_line]);
+            let refused = sign_at(&alone, false, at(first + 3));
+            assert!(refused.unwrap_err().contains("sybil_history"));
+        });
     }
 
     #[test]
