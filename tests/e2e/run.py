@@ -773,7 +773,11 @@ def scenario_removal_while_closed(devices):
             unlock(tablet)
             time.sleep(5)
         elif tablet.visible("chats_row_title"):
-            tablet.tap("chats_row_title", text="Bob")
+            # The lock can come between the look and the tap.
+            try:
+                tablet.tap("chats_row_title", timeout=5, text="Bob")
+            except Fault:
+                continue
             time.sleep(5)
         elif tablet.visible("chat_input"):
             tablet.back()
