@@ -10382,13 +10382,15 @@ guard relay1.example.org"
         while handle.next_event().is_some() {}
 
         // IMP-119: an action of the user starts the idle time again, and a
-        // tick inside that time locks nothing.
+        // tick inside that time locks nothing. The clock of the test starts
+        // before that action: a slow machine can take a part of the idle
+        // time for the tick.
+        let start = std::time::Instant::now();
         handle.touch();
         Arc::clone(&handle).tick();
         assert!(locked(&handle.inner).client.is_unlocked());
 
         // The idle time passes with no action, and a tick locks the client.
-        let start = std::time::Instant::now();
         while locked(&handle.inner).client.is_unlocked() {
             assert!(start.elapsed() < Duration::from_secs(30), "no auto-lock");
             std::thread::sleep(Duration::from_millis(100));

@@ -4769,7 +4769,8 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     loop {
         match alice.rotate_handle_key() {
             Ok(()) => break,
-            Err(FfiError::Busy) => {
+            // A slow machine has no link yet after the renewal of the sessions.
+            Err(FfiError::Busy | FfiError::Offline) => {
                 assert!(start.elapsed() < Duration::from_secs(40), "no key rotation");
                 std::thread::sleep(Duration::from_millis(500));
             }
