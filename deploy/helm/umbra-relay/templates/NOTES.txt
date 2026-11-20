@@ -1,4 +1,12 @@
 The relay {{ .Values.relay.name }} starts{{ with .Values.node }} on the node {{ . }}{{ end }}.
+{{- if .Values.relay.host }}
+
+It shows a certificate for {{ .Values.relay.host }}{{ if .Values.certbot }}, which certbot gets on port 80 of the node{{ end }}.
+{{- else }}
+
+It has no DNS name: it makes its own certificate, and it needs no certbot
+and no port 80. The other relays know it by the hash of that certificate.
+{{- end }}
 
 A pod in ImagePullBackOff has no published image of this version:
 deploy/relay/README.md, "The image on Kubernetes", gives the build.

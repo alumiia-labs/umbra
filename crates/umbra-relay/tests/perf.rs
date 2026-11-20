@@ -810,6 +810,7 @@ fn socket_run(
 
     let dial_of = |port: u16| Dial {
         host: "localhost".to_owned(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port,

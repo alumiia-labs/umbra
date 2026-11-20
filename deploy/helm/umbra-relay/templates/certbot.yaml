@@ -1,7 +1,9 @@
 {{- /* The certificate of relay.host, from Let's Encrypt: certbot answers
        the challenge on port 80 of the node, renews twice a day, and writes
-       each new certificate to <root>/tls. The relay starts again with it. */ -}}
-{{- if .Values.certbot }}
+       each new certificate to <root>/tls. The relay starts again with it.
+       A relay with no relay.host is in pin form (Part 10 REL-143) and
+       needs no certificate of a public authority. */ -}}
+{{- if and .Values.certbot .Values.relay.host }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

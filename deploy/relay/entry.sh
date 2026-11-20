@@ -8,8 +8,15 @@
 #
 # deploy/relay/relay.env.example names each variable. The keys never leave
 # the state directory.
+#
+# A relay with no UMBRA_PUBLIC_HOST is in pin form (Part 10 REL-143): it
+# makes its own link certificate in the state directory, and it needs no
+# DNS name, no certbot, and no port 80. An entry relay has a host, because
+# phones verify its certificate against that name.
 set -euo pipefail
 umask 077
+
+UMBRA_PUBLIC_HOST=${UMBRA_PUBLIC_HOST:-}
 
 # Under Kubernetes this shell is process 1, which takes no default action
 # on a signal.
@@ -94,8 +101,10 @@ memory_check() {
 }
 
 # The relay reads its certificate at its start. Thus the entry stops it when
-# certbot writes a new one, and the restart policy starts it again.
+# certbot writes a new one, and the restart policy starts it again. A relay
+# in pin form reads no file of certbot, and its link certificate stays.
 stamp() {
+    [ -n "$UMBRA_PUBLIC_HOST" ] || return 0
     stat -Lc '%Y %s' "$TLS_DIR/cert.pem" "$TLS_DIR/key.pem" 2>/dev/null | tr '\n' ' ' || true
 }
 
@@ -141,10 +150,11 @@ make_keys() {
 
 relay_conf() {
     network_values
-    need UMBRA_RELAY_NAME UMBRA_RELAY_ROLE UMBRA_RELAY_CLASS UMBRA_PUBLIC_HOST \
+    need UMBRA_RELAY_NAME UMBRA_RELAY_ROLE UMBRA_RELAY_CLASS \
         UMBRA_PUBLIC_ADDRESS UMBRA_PUBLIC_PORT UMBRA_OPERATOR UMBRA_COUNTRY UMBRA_ASN \
         UMBRA_FAMILY UMBRA_SIGNER
     local name=$UMBRA_RELAY_NAME role=$UMBRA_RELAY_ROLE class=$UMBRA_RELAY_CLASS roles
+    local host=$UMBRA_PUBLIC_HOST
 
     [[ "$name" =~ ^[a-z0-9-]+$ ]] || die "UMBRA_RELAY_NAME takes a-z, 0-9 and -"
     [[ "$class" =~ ^[0-3]$ ]] || die "UMBRA_RELAY_CLASS is 0, 1, 2 or 3"
@@ -158,7 +168,7 @@ relay_conf() {
     # value there. scripts/relay-admit.py has the same patterns.
     [[ "$UMBRA_OPERATOR" =~ ^[A-Za-z0-9._-]+$ ]] ||
         die "UMBRA_OPERATOR takes letters, digits, and . _ -"
-    [[ "$UMBRA_PUBLIC_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "UMBRA_HOST is a DNS name"
+    [[ "$host" =~ ^[A-Za-z0-9.-]*$ ]] || die "UMBRA_HOST is a DNS name, or it is empty"
     [[ "$UMBRA_PUBLIC_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$UMBRA_PUBLIC_PORT" -ge 1 ] &&
         [ "$UMBRA_PUBLIC_PORT" -le 65535 ] || die "UMBRA_PORT is a port number"
 
@@ -169,6 +179,9 @@ relay_conf() {
             # port 443 alone still reaches it.
             [ "$class" -ge 1 ] || die "an entry relay takes class 1 or more"
             [ "$UMBRA_PUBLIC_PORT" = 443 ] || die "an entry relay takes port 443"
+            # Part 10 REL-226: a phone verifies the certificate of an entry
+            # relay against its name.
+            [ -n "$host" ] || die "an entry relay takes a DNS name: set UMBRA_HOST"
             ;;
         middle) roles=chain ;;
         exit) roles=queue,chain,attachment ;;
@@ -181,7 +194,7 @@ relay_conf() {
     # The lines that the descriptor states. A change of one of them takes a
     # new descriptor.
     {
-        echo "public=$UMBRA_PUBLIC_HOST,$UMBRA_PUBLIC_ADDRESS,$UMBRA_PUBLIC_PORT"
+        echo "public=$host,$UMBRA_PUBLIC_ADDRESS,$UMBRA_PUBLIC_PORT"
         echo "operator=$UMBRA_OPERATOR"
         echo "country=$UMBRA_COUNTRY"
         echo "asn=$UMBRA_ASN"
@@ -194,14 +207,23 @@ relay_conf() {
         fi
     } > "$RUN/public.conf"
 
+    # A relay with a host waits for the files of certbot. A relay in pin
+    # form waits for nothing: the relay makes its link certificate itself.
+    if [ -n "$host" ]; then
+        wait_for "$TLS_DIR/cert.pem" "the certificate of $host"
+        wait_for "$TLS_DIR/key.pem" "the key of the certificate"
+    fi
+
     # The settings file stays in memory, thus the keys in it reach no disk
     # outside the state directory.
-    wait_for "$TLS_DIR/cert.pem" "the certificate of $UMBRA_PUBLIC_HOST"
-    wait_for "$TLS_DIR/key.pem" "the key of the certificate"
     {
         echo "listen=0.0.0.0:$UMBRA_PUBLIC_PORT"
-        echo "cert=$TLS_DIR/cert.pem"
-        echo "key=$TLS_DIR/key.pem"
+        if [ -n "$host" ]; then
+            echo "cert=$TLS_DIR/cert.pem"
+            echo "key=$TLS_DIR/key.pem"
+        else
+            echo "link=$STATE/link"
+        fi
         echo "store=$STATE/relay.db"
         cat "$RUN/public.conf"
         echo "manifest=$STATE/manifest.bin"
@@ -218,21 +240,31 @@ relay_conf() {
     } > "$RUN/relay.conf"
 }
 
+# What the descriptor states: the public lines, the keys, and the link
+# certificate of a relay in pin form, whose pin the descriptor carries.
+descriptor_sum() {
+    {
+        cat "$RUN/public.conf" "$STATE/secret.conf"
+        if [ -z "$UMBRA_PUBLIC_HOST" ] && [ -s "$STATE/link.cert" ]; then
+            cat "$STATE/link.cert"
+        fi
+    } | sha256sum | cut -d' ' -f1
+}
+
 # Each signature differs, and a manifest with another descriptor has another
 # root. An hour takes one root (Part 10 REL-160). Thus the relay signs only
-# when it has no descriptor, or when a line that the descriptor states
+# when it has no descriptor, or when a value that the descriptor states
 # changed.
 relay_descriptor() {
-    local sum
-    sum=$(cat "$RUN/public.conf" "$STATE/secret.conf" | sha256sum | cut -d' ' -f1)
-
-    if [ -s "$STATE/relay.desc" ] && [ "$(cat "$STATE/relay.desc.sum" 2>/dev/null)" = "$sum" ]; then
+    if [ -s "$STATE/relay.desc" ] && [ "$(cat "$STATE/relay.desc.sum" 2>/dev/null)" = "$(descriptor_sum)" ]; then
         return 0
     fi
 
+    # A relay in pin form makes its link certificate here, at its first
+    # descriptor. The sum thus comes after the signature.
     umbra-relay sign-descriptor "$RUN/relay.conf" "$STATE/relay.desc.part"
     mv "$STATE/relay.desc.part" "$STATE/relay.desc"
-    echo "$sum" > "$STATE/relay.desc.sum"
+    descriptor_sum > "$STATE/relay.desc.sum"
     chmod 0644 "$STATE/relay.desc"
     say "signed a new descriptor: run join, and give the request to the network"
 }

@@ -70,20 +70,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 263 | 94 | 1 | 0 | 11 | **369** |
+| `NET` | 264 | 95 | 1 | 0 | 11 | **371** |
 | `IDN` | 138 | 46 | 1 | 0 | 5 | **190** |
 | `CRY` | 121 | 27 | 0 | 0 | 2 | **150** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
 | `DEV` | 228 | 95 | 0 | 0 | 15 | **338** |
 | `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
 | `DIS` | 138 | 38 | 1 | 0 | 3 | **180** |
-| `REL` | 175 | 34 | 1 | 0 | 4 | **214** |
+| `REL` | 179 | 34 | 1 | 0 | 4 | **218** |
 | `GRP` | 245 | 69 | 0 | 0 | 5 | **319** |
 | `ATT` | 153 | 47 | 2 | 0 | 3 | **205** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2189 | 650 | 8 | 0 | 66 | **2913** |
+| **All** | 2194 | 651 | 8 | 0 | 66 | **2919** |
 
 ## SCP — Scope and Conventions
 
@@ -510,6 +510,8 @@ Source: `spec/03-network-architecture.md`
 | `NET-377` | §3.5.2 | MUST NOT | The backlogs of the client links of one relay | The backlogs of the client links of one relay MUST NOT hold more than `RELAY_BACKLOG_MAX` together. |  |  |
 | `NET-378` | §3.4.4 | MUST NOT | (unstated) | A client MUST discard an answer or a record of a circuit that passes the comparison of NET-114 and that the client cannot use, and it MUST NOT end its session with the ingress relay for that cause. |  |  |
 | `NET-379` | §3.4.4 | MUST | A client | A client MUST tear down a circuit that gave 8 cells with an answer that the client cannot use, and it MUST build that circuit again under NET-347. |  |  |
+| `NET-380` | §3.8 | MUST | A party that dials a relay in pin form | A party that dials a relay in pin form MUST accept the end-entity certificate of the TLS handshake only when the SHA3-256 of its DER encoding equals the pin of the descriptor. |  |  |
+| `NET-381` | §3.8 | MUST NOT | A party that dials a relay in pin form | A party that dials a relay in pin form MUST NOT send a server name in the ClientHello. |  |  |
 
 ## IDN — Identity
 
@@ -2198,11 +2200,11 @@ Source: `spec/10-relay-directory.md`
 | `REL-140` | §10.6 | MUST NOT | A directory authority | A directory authority MUST NOT list an ASN above 10 % of one population of one bloc. |  |  |
 | `REL-141` | §10.6.3 | MUST | A client | A client MUST verify that the SHA3-256 of the `BlocList` equals `bloc_hash` of the accepted `DirectoryRoot` before it applies `REL-092`. |  |  |
 | `REL-142` | §10.6.3 | MUST NOT | A directory authority | A directory authority MUST NOT publish a `BlocList` under which the current relay set does not reach the floor. |  |  |
-| `REL-143` | §10.5.3 | MUST | A relay | A relay MUST set `host` to the DNS name that the TLS certificate of its co-tenant site names, in ASCII, with zero bytes after the name. |  |  |
-| `REL-144` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `host` is empty, holds a byte outside the DNS name characters, or holds a non-zero byte after a zero byte. |  |  |
+| `REL-143` | §10.5.3 | MUST | A relay | A relay MUST set `host` to the name form or to the pin form of this table: |  |  |
+| `REL-144` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `host` is in neither form. |  |  |
 | `REL-145` | §10.5.5 | MUST | A carrier | A carrier MUST give the manifest in the encoding above, with the entries in ascending order of `relay_id`. |  |  |
 | `REL-146` | §10.5.5 | MUST | A client | A client MUST verify the root under §10.5.2 before it verifies one entry. |  |  |
-| `REL-147` | §10.5.5 | MUST | A client | A client MUST reject the whole manifest when one entry fails `REL-050`, `REL-051`, `REL-057` or `REL-144`, when two entries are not in ascending order of `relay_id`, when a `step_count` is above 16, or when a `side` is not `0x00` or `0x01`. |  |  |
+| `REL-147` | §10.5.5 | MUST | A client | A client MUST reject the whole manifest when one entry fails `REL-050`, `REL-051`, `REL-057`, `REL-144`, `REL-227` or `REL-228`, when two entries are not in ascending order of `relay_id`, when a `step_count` is above 16, or when a `side` is not `0x00` or `0x01`. |  |  |
 | `REL-148` | §10.5.5 | MUST | A client | A client MUST reject an entry whose `valid_after` is above the `epoch` of the root. |  |  |
 | `REL-149` | §10.5.5 | MUST | A client | A client MUST reject a manifest whose root names a `bloc_hash` that differs from the hash of the `BlocList` that the client holds. |  |  |
 | `REL-150` | §10.5.4 | MUST NOT | A client | A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its descriptor is not set. |  |  |
@@ -2270,6 +2272,10 @@ Source: `spec/10-relay-directory.md`
 | `REL-223` | §10.2 | MUST | A relay with no passed class test inside `MEASURE_STALE` | A relay with no passed class test inside `MEASURE_STALE` MUST be listed at C0 while another relay of its own operator at the same place has such a test and keeps that place in the root. |  |  |
 | `REL-224` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `port` is 0, and one whose `addr_v4` and `addr_v6` are both zero. |  |  |
 | `REL-225` | §10.5.3 | MUST | A client | A client MUST reject a `RelaySetDiff` that names one `relay_id` two times, in one list or across the two lists. |  |  |
+| `REL-226` | §10.5.3 | MUST | A relay that offers the ingress role (`roles` bit 2) | A relay that offers the ingress role (`roles` bit 2) MUST use the name form. |  |  |
+| `REL-227` | §10.5.3 | MUST | A client | A client MUST reject a descriptor in pin form whose `roles` bit 2 is set. |  |  |
+| `REL-228` | §10.5.3 | MUST | A client | A client MUST reject an entry of §10.5.4 whose `flags` bit 0 is set and whose descriptor is in pin form. |  |  |
+| `REL-229` | §10.5.3 | MUST | A relay in pin form | A relay in pin form MUST give the certificate of its pin as the end-entity certificate of each TLS handshake on its listener. |  |  |
 
 ## GRP — Private Groups
 

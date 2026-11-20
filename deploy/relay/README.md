@@ -16,8 +16,8 @@ no image of this version is published.
 | --- | --- |
 | Linux with Docker Engine 24 or newer and the compose plugin | The relay uses the network of the host. Docker Desktop on Windows or macOS gives it another address. An x86-64 or ARM64 machine works. |
 | A public IPv4 address that reaches this machine | Phones and other relays dial the address in the descriptor. Carrier-grade NAT (CGNAT) does not work. |
-| A DNS name with an A record to that address | The relay shows a certificate for this name. A dynamic DNS name works. |
-| Port 80 and the relay port, forwarded on your router | certbot uses port 80 for the certificate. |
+| The relay port, forwarded on your router | Other relays dial it. A middle relay or an exit relay needs no other port. |
+| For an entry relay alone: a DNS name with an A record to that address, and port 80 | Phones verify the certificate of an entry relay against its name. certbot uses port 80 for that certificate. A dynamic DNS name works. |
 | 100 Mbit/s or more in both directions | The network lists no relay below class 0 (Part 10 `REL-197`). Upload counts too. |
 | A clock that follows the network time | chrony or systemd-timesyncd. A root of the directory lives three hours, and a wrong clock rejects it. |
 | 2 GB of memory for a middle relay, 3 GB for an exit relay | An exit relay holds its file chunks in memory. |
@@ -26,9 +26,16 @@ no image of this version is published.
 
 | Role | What it does | What it needs |
 | --- | --- | --- |
-| `middle` | The middle of a chain. It sees no client address and no queue. | The least. Start with this role. |
-| `exit` | The last relay of a chain. It holds message queues and file chunks, and it pushes alerts to phones. | A machine that stays on, and memory for the chunks. |
-| `entry` | The first relay, which phones reach. | Port 443 and class 1 (250 Mbit/s) or more. |
+| `middle` | The middle of a chain. It sees no client address and no queue. | The least: no DNS name and no port 80. Start with this role. |
+| `exit` | The last relay of a chain. It holds message queues and file chunks, and it pushes alerts to phones. | A machine that stays on, and memory for the chunks. No DNS name and no port 80. |
+| `entry` | The first relay, which phones reach. | A DNS name, port 80 for certbot, port 443, and class 1 (250 Mbit/s) or more. |
+
+A middle relay or an exit relay with no `UMBRA_HOST` makes its own
+certificate one time. Its descriptor holds the hash of that certificate in
+the place of a host name, and each relay that dials it accepts that
+certificate alone (Part 10 `REL-143`, Part 3 `NET-380`). No phone dials such
+a relay. An entry relay needs a certificate of a public authority: set
+`UMBRA_HOST`, and set `COMPOSE_PROFILES=certbot`.
 
 ## Steps
 
@@ -63,9 +70,9 @@ no image of this version is published.
    docker compose logs -f relay
    ```
 
-   The relay makes its keys one time, gets its certificate, and signs its
-   descriptor. Until the network admits it, the log says that no manifest
-   gives this relay a place. That is correct.
+   The relay makes its keys one time, gets or makes its certificate, and
+   signs its descriptor. Until the network admits it, the log says that no
+   manifest gives this relay a place. That is correct.
 
 5. Make the join request.
 
@@ -111,8 +118,14 @@ later pass places it again at the same layer.
   and put the new block in a comment on your request. Until the signer has
   it, clients dial the old address.
 - **Backups.** Back up `data/relay`. It holds the keys of the relay. A
-  lost key makes a new relay, which waits 4 days again.
-- **Your own certificate.** Set `COMPOSE_PROFILES=` in `.env`. Put
+  lost key makes a new relay, which waits 4 days again. For a relay with no
+  `UMBRA_HOST` it also holds the certificate, in `link.cert` and
+  `link.key`. A lost certificate makes a new descriptor: run `join` again.
+- **A name for a relay that had none, or no name for a relay that had
+  one.** The change makes a new descriptor. Run `join` again. A relay that
+  runs with a name and certbot keeps both until you change `UMBRA_HOST`.
+- **Your own certificate.** For a relay with a `UMBRA_HOST`: set
+  `COMPOSE_PROFILES=` in `.env`. Put
   `cert.pem` (the full chain) and `key.pem` in `data/tls`. Give them the
   group 10000, and mode 0640 for the key. The relay starts again when the
   files change.

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.58.0
+**Version:** 0.59.0
 **Date:** 2026-11-19
 
 ---
@@ -187,7 +187,8 @@ UMBRA does not claim to be unblockable. Refer to the non-goals in Part 2 §2.5.
 
 Two properties of the design limit the damage from a lost relay:
 
-1. A relay shares its IP address and port 443 with a genuine website. Thus a
+1. An ingress relay shares its IP address and port 443 with a genuine
+   website, and a client dials no other relay (Part 10 `REL-228`). Thus a
    destination address does not give a list of the users of UMBRA (G8).
 2. A client holds two pinned ingress relays (Part 10 §10.6.1). Thus the loss
    of one relay does not stop delivery (U6).

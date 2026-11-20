@@ -696,6 +696,7 @@ fn node_of(
     let address = table.guard.ipv4.as_slice().try_into();
     let dial = Dial {
         host: table.guard.host.clone(),
+        link_pin: None,
         addr_v4: Some(address.map_err(|_| FfiError::Malformed)?),
         addr_v6: None,
         port: table.guard.port,

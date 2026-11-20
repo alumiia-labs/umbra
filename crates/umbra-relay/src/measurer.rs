@@ -92,6 +92,7 @@ impl Target {
             layer,
             dial: Dial {
                 host: parsed.host_str().to_owned(),
+                link_pin: parsed.link_pin(),
                 addr_v4: (parsed.addr_v4 != [0; 4]).then_some(parsed.addr_v4),
                 addr_v6: (parsed.addr_v6 != [0; 16]).then_some(parsed.addr_v6),
                 port: parsed.port,
@@ -630,6 +631,7 @@ mod tests {
             layer: 1,
             dial: Dial {
                 host: String::new(),
+                link_pin: None,
                 addr_v4: Some(v4),
                 addr_v6: None,
                 port: 443,

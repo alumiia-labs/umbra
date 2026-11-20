@@ -67,6 +67,30 @@
 //! The `public` line gives the host name of the certificate, the address,
 //! and the port that a client dials. The `descriptor` form reads it.
 //!
+//! A relay that no client dials, thus a relay of layer 2 or 3, needs no
+//! host name and no certificate of a public authority (Part 10 `REL-143`).
+//! Its settings file has no `cert` line and no `key` line, and its `public`
+//! line has an empty host:
+//!
+//! ```text
+//! link=/var/lib/umbra/link
+//! public=,203.0.113.7,9443
+//! ```
+//!
+//! The relay makes one self-signed certificate at its first start, or at
+//! the first `sign-descriptor`, and keeps it in the files
+//! `/var/lib/umbra/link.cert` and `/var/lib/umbra/link.key`, in DER. With
+//! no `link` line the two files sit beside the store, with `.link.cert` and
+//! `.link.key` after the name of the `store` line. The
+//! descriptor then carries the pin of that certificate in the place of a
+//! host name, and a relay that dials this one accepts that certificate
+//! alone (Part 3 `NET-380`). A new certificate needs a new descriptor, thus
+//! keep the two files. A relay with the ingress role has a host name, and
+//! it takes the `cert` and `key` lines.
+//! With `cert` and `key` lines and an empty host, the descriptor carries
+//! the pin of the first certificate of the `cert` file. A `next` line names
+//! a relay by its host name alone.
+//!
 //! The `store` line names the SQLite file of the queues. A relay with no
 //! such line keeps its queues in RAM, and a restart of it ends each contact
 //! that it served. It says so at its start. The link receipts of the relay
@@ -102,7 +126,7 @@ use std::{collections::BTreeMap, process::ExitCode};
 
 use tokio::net::TcpListener;
 use umbra_core::directory::{
-    descriptor::{roles, RelayDescriptor, HOST_LEN},
+    descriptor::{pin_host, roles, RelayDescriptor, HOST_LEN},
     EPOCH_SECONDS,
 };
 use umbra_crypto::{
@@ -115,11 +139,12 @@ use umbra_crypto::{
     zeroize::Zeroizing,
 };
 use umbra_relay::{
+    linkcert,
     node::{Config, RelayNode},
     placement::placement,
     server::{
-        run_relay, tls_acceptor, Carried, ConnectionLimits, ManifestSource, OhttpForward, OsRng,
-        PACING_MEAN_MS,
+        link_acceptor, run_relay, tls_acceptor, Carried, ConnectionLimits, ManifestSource,
+        OhttpForward, OsRng, PACING_MEAN_MS,
     },
     sqlite_store::{SqliteShelf, SqliteStore},
     store::{MemoryStore, RelayStore},
@@ -136,10 +161,50 @@ fn secret32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
     Some(out)
 }
 
+/// The certificate of the listener.
+enum Certificate {
+    /// A chain and its key in two PEM files.
+    Files { cert: String, key: String },
+    /// The link certificate of a relay in pin form, in the two files of
+    /// this path: the `link` line, or the `store` line with `.link` after
+    /// it.
+    Link(String),
+}
+
+impl Certificate {
+    /// The lines `cert` and `key`, or else the link certificate. A relay
+    /// with no `link` line keeps it beside its store.
+    fn of(values: &BTreeMap<&str, &str>) -> Option<Self> {
+        let line = |name: &str| values.get(name).map(|value| (*value).to_owned());
+
+        match (line("cert"), line("key"), line("link")) {
+            (Some(cert), Some(key), None) => Some(Certificate::Files { cert, key }),
+            (None, None, Some(link)) => Some(Certificate::Link(link)),
+            (None, None, None) => Some(Certificate::Link(format!("{}.link", line("store")?))),
+            _ => None,
+        }
+    }
+
+    /// The pin of the certificate that a dialer sees (Part 10 `REL-143`).
+    /// A relay with a `link` line and no certificate yet makes it here.
+    fn pin(&self) -> Option<[u8; 32]> {
+        use rustls::pki_types::{pem::PemObject, CertificateDer};
+
+        match self {
+            Certificate::Files { cert, .. } => {
+                let first = CertificateDer::pem_file_iter(cert).ok()?.next()?.ok()?;
+                Some(native::link_pin(&first))
+            }
+            Certificate::Link(link) => {
+                Some(native::link_pin(&linkcert::load_or_make(link)?.certificate))
+            }
+        }
+    }
+}
+
 struct Settings {
     listen: String,
-    cert: String,
-    key: String,
+    certificate: Certificate,
     trust: Option<String>,
     store: Option<String>,
     public: Option<String>,
@@ -192,13 +257,14 @@ struct Settings {
 }
 
 /// The lines that a settings file can hold.
-const KNOWN_LINES: [&str; 31] = [
+const KNOWN_LINES: [&str; 32] = [
     "listen",
     "layer",
     "relay_id",
     "static_secret",
     "cert",
     "key",
+    "link",
     "chunk_capacity",
     "next",
     "trust",
@@ -254,6 +320,7 @@ fn dial_of(value: &str) -> Option<Dial> {
 
     Some(Dial {
         host,
+        link_pin: None,
         addr_v4: Some(address.octets()),
         addr_v6: None,
         port,
@@ -300,6 +367,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             relay_id,
             Dial {
                 host,
+                link_pin: None,
                 addr_v4: Some(address.octets()),
                 addr_v6: None,
                 port,
@@ -475,8 +543,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
 
     Some(Settings {
         listen: (*values.get("listen")?).to_owned(),
-        cert: (*values.get("cert")?).to_owned(),
-        key: (*values.get("key")?).to_owned(),
+        certificate: Certificate::of(&values)?,
         trust: values.get("trust").map(|path| (*path).to_owned()),
         store: values.get("store").map(|path| (*path).to_owned()),
         public: values.get("public").map(|value| (*value).to_owned()),
@@ -605,7 +672,9 @@ fn sign_descriptor(settings: &Settings, out: &str) -> ExitCode {
         eprintln!(
             "the settings file needs: identity_seed=, public=<host>,<IPv4 address>,<port>, \
              country=, asn=, family=<64 hex characters>, class=<0 to 3>, \
-             roles=<queue,chain,ingress,attachment>"
+             roles=<queue,chain,ingress,attachment>. A relay with a host needs cert= and \
+             key=. A relay with an empty host has no ingress role, and its certificate \
+             must read."
         );
         return ExitCode::from(2);
     };
@@ -641,8 +710,7 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
         .try_into()
         .ok()?;
 
-    let mut host = [0u8; HOST_LEN];
-    host.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+    let host = host_field(name, &settings.certificate)?;
 
     let fact = |name: &str| settings.facts.get(name).map(String::as_str);
     let mut role_bits = 0u8;
@@ -682,8 +750,27 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
     .ok()
 }
 
+/// The `host` of the descriptor (`REL-143`): the name form for a relay with
+/// a host name, and the pin form for a relay with an empty one.
+fn host_field(name: &str, certificate: &Certificate) -> Option<[u8; HOST_LEN]> {
+    if name.is_empty() {
+        return Some(pin_host(&certificate.pin()?));
+    }
+
+    // A dialer verifies a name under the public CA roots, and a link
+    // certificate chains to none of them.
+    if matches!(certificate, Certificate::Link(_)) {
+        return None;
+    }
+
+    let mut host = [0u8; HOST_LEN];
+    host.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+    Some(host)
+}
+
 /// Prints the line of this relay in a network descriptor, which holds the
-/// public half of its identity and the place that a client dials.
+/// public half of its identity and the place that a client dials. A relay
+/// in pin form has `-` in the place of its host: no client dials it.
 fn descriptor(settings: &Settings) -> ExitCode {
     let parts: Option<[&str; 3]> = settings
         .public
@@ -709,6 +796,7 @@ fn descriptor(settings: &Settings) -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let host = if host.is_empty() { "-" } else { host };
     println!(
         "relay {host} {address} {port} {} {} layer={}{facts}",
         hex::write(&settings.config.relay.s),
@@ -783,7 +871,30 @@ async fn run() -> ExitCode {
         _ => {}
     }
 
-    let Some(tls) = tls_acceptor(&settings.cert, &settings.key) else {
+    // A dialer accepts a link certificate under a pin alone, and the pin
+    // is in the descriptor of a `public` line with an empty host.
+    let is_pin_form = settings
+        .public
+        .as_deref()
+        .is_some_and(|public| public.starts_with(','));
+    let tls = match &settings.certificate {
+        Certificate::Files { cert, key } => tls_acceptor(cert, key),
+        Certificate::Link(_) if !is_pin_form => {
+            eprintln!(
+                "the settings file needs the lines cert= and key=, or a public= line with \
+                 an empty host"
+            );
+            return ExitCode::from(2);
+        }
+        Certificate::Link(link) => linkcert::load_or_make(link).and_then(|made| {
+            println!(
+                "link_pin={}",
+                hex::write(&native::link_pin(&made.certificate))
+            );
+            link_acceptor(&made)
+        }),
+    };
+    let Some(tls) = tls else {
         eprintln!("the certificate or the key does not load");
         return ExitCode::from(2);
     };
@@ -990,6 +1101,104 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// The settings of a relay with the roles `relay_roles`, the lines
+    /// `certificate`, and the host `host`.
+    fn settings_of(name: &str, relay_roles: &str, certificate: &str, host: &str) -> Settings {
+        let path = std::env::temp_dir().join(format!(
+            "umbra-relay-test-{}-{name}.conf",
+            std::process::id()
+        ));
+
+        let text = format!(
+            "listen=127.0.0.1:0\n{certificate}\n\
+             identity_seed={seed}\nstatic_secret={secret}\n\
+             public={host},203.0.113.7,9443\n\
+             country=US\nasn=64500\nfamily={family}\nclass=1\nroles={relay_roles}\n",
+            seed = "11".repeat(32),
+            secret = "22".repeat(32),
+            family = "33".repeat(32),
+        );
+
+        std::fs::write(&path, text).unwrap();
+        let settings = read_settings(path.to_str().unwrap(), false);
+        let _ = std::fs::remove_file(&path);
+        settings.unwrap()
+    }
+
+    #[test]
+    fn a_relay_with_an_empty_host_signs_the_pin_of_its_link_certificate() {
+        let work = || {
+            let base = std::env::temp_dir().join(format!("umbra-link-main-{}", std::process::id()));
+            let base = base.to_str().unwrap().to_owned();
+            let link = format!("link={base}");
+
+            // REL-143: the pin is the hash of the certificate file.
+            let pinned = signed_descriptor(&settings_of("pin", "queue,chain", &link, "")).unwrap();
+            let pinned = RelayDescriptor::parse(&pinned).unwrap();
+            let file = std::fs::read(format!("{base}.cert")).unwrap();
+            assert_eq!(pinned.link_pin(), Some(sha3_256(&[&file])));
+            assert_eq!(pinned.host_str(), "");
+
+            // The certificate stays, thus a second descriptor has the pin.
+            let again = signed_descriptor(&settings_of("pin", "chain", &link, "")).unwrap();
+            let again = RelayDescriptor::parse(&again).unwrap();
+            assert_eq!(again.link_pin(), pinned.link_pin());
+
+            // REL-226: no pin form with the ingress role.
+            let ingress = settings_of("pin-ingress", "chain,ingress", &link, "");
+            assert!(signed_descriptor(&ingress).is_none());
+
+            // A host name needs a certificate of a public authority.
+            let named = settings_of("pin-named", "chain", &link, "relay.example.org");
+            assert!(signed_descriptor(&named).is_none());
+
+            // The lines `cert` and `key` with an empty host: the pin of the
+            // first certificate of the file.
+            let fixture = |name: &str| {
+                format!(
+                    "{}/../../tests/fixtures/tls/{name}",
+                    env!("CARGO_MANIFEST_DIR")
+                )
+            };
+            let files = format!("cert={}\nkey={}", fixture("leaf.pem"), fixture("leaf.key"));
+            let own = signed_descriptor(&settings_of("pin-own", "chain", &files, "")).unwrap();
+            assert!(RelayDescriptor::parse(&own).unwrap().link_pin().is_some());
+
+            let _ = std::fs::remove_file(format!("{base}.cert"));
+            let _ = std::fs::remove_file(format!("{base}.key"));
+        };
+
+        std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn(work)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_settings_file_names_one_certificate_source() {
+        let read = |lines: &str| {
+            let values: BTreeMap<&str, &str> =
+                lines.lines().filter_map(|l| l.split_once('=')).collect();
+            Certificate::of(&values)
+        };
+
+        assert!(matches!(
+            read("cert=a\nkey=b"),
+            Some(Certificate::Files { .. })
+        ));
+        assert!(matches!(read("link=c"), Some(Certificate::Link(link)) if link == "c"));
+        assert!(read("cert=a").is_none());
+        assert!(read("cert=a\nkey=b\nlink=c").is_none());
+
+        // With no line of the three, the link certificate sits beside the
+        // store. A relay with no store has no place for it.
+        let beside = read("store=d/relay.db");
+        assert!(matches!(beside, Some(Certificate::Link(link)) if link == "d/relay.db.link"));
+        assert!(read("").is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.58.0
+**Version:** 0.59.0
 **Date:** 2026-11-19
 
 ---
@@ -2971,7 +2971,7 @@ independently:
 
 | Layer | Content |
 | --- | --- |
-| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). **TLS over TCP is the one transport of v1, and QUIC is deferred.** The deferred web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
+| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream. At an ingress relay the stream is co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). **TLS over TCP is the one transport of v1, and QUIC is deferred.** The deferred web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
 | **L2 Session** | A session with a 64-bit session ID and a monotonic sequence. The design makes it independent of the connection. A client that closes its connection pauses the session first, and it resumes the session and each circuit of it on a new connection inside `SESSION_RESUME_WINDOW`. A resume sends no frame again, thus a TCP RST, a middlebox timeout, or a Wi-Fi-to-cellular handover keeps the session only when no frame was in flight. Part 6 §6.2.3 gives the open, the pause, the resume, and the close |
 | **L3 Cell** | Fixed-size cells (§3.3) over the 3-hop chain into queues |
 
@@ -3027,9 +3027,10 @@ circuit. Part 6 §6.2.3 holds the rules.
 - **The key share.** **[NET-214]** A client MUST offer `X25519MLKEM768` as the
   first key share of the ClientHello. **[NET-215]** A client MUST NOT offer a
   group other than `X25519MLKEM768` and `X25519`. **[NET-216]** A relay
-  operator MUST terminate TLS with a stack that accepts `X25519MLKEM768`. The
-  reverse proxy of the co-tenant site is that stack, thus the operator selects
-  a proxy build that holds the group. The second group keeps a client
+  operator MUST terminate TLS with a stack that accepts `X25519MLKEM768`. At
+  a relay with a co-tenant site, the reverse proxy of that site is the stack,
+  thus the operator selects a proxy build that holds the group. The second
+  group keeps a client
   connected to a relay whose proxy fails that rule. The circuit handshake of
   Part 5 §5.4.9 carries G2 in that case. It is hybrid at each hop, and it
   does not depend on the key share of the TLS layer. The session records of
@@ -3049,7 +3050,9 @@ circuit. Part 6 §6.2.3 holds the rules.
   carries the `host` of the descriptor of Part 10 §10.5.3, `Upgrade: websocket`,
   `Connection: Upgrade`, a `Sec-WebSocket-Key` of 16 bytes from the CSPRNG in
   base64, `Sec-WebSocket-Version: 13`, and `Sec-WebSocket-Protocol: umbra.v1`,
-  and no extension header.
+  and no extension header. A relay that dials a relay opens the stream with
+  the same request. For a relay in pin form, `NET-381` gives the `Host`
+  header.
 
   **[NET-281]** A relay MUST answer an upgrade it accepts with status `101`,
   the `Sec-WebSocket-Accept` of RFC 6455 §4.2.2, and the same subprotocol, and
@@ -3060,8 +3063,40 @@ circuit. Part 6 §6.2.3 holds the rules.
 
   **[NET-282]** A client MUST verify the TLS certificate of a relay against the
   `host` of its descriptor under the public CA roots, and it MUST NOT accept a
-  connection without that check. **[NET-283]** A QUIC connection MUST
-  negotiate the ALPN `umbra.v1`, and the TCP connection negotiates none.
+  connection without that check. A client dials an ingress relay alone, and
+  the descriptor of an ingress relay is in the name form of Part 10 §10.5.3
+  (`REL-228`). Each other party that dials a relay in name form makes the
+  same check: a relay that dials its next hop, a measurer, and a directory
+  authority. **[NET-283]** A QUIC connection MUST negotiate the ALPN
+  `umbra.v1`, and the TCP connection negotiates none.
+- **The link to a relay in pin form.** A relay of layer 2 or 3 can have no
+  DNS name. Its descriptor then holds the pin of its link certificate in the
+  place of a name (Part 10 `REL-143`). A relay, a measurer, and a directory
+  authority dial such a relay, and a client does not (`REL-228`).
+
+  **[NET-380]** A party that dials a relay in pin form MUST accept the
+  end-entity certificate of the TLS handshake only when the SHA3-256 of its
+  DER encoding equals the pin of the descriptor. It MUST compare the two
+  values in constant time. It MUST verify the signature of the TLS handshake
+  under the key of that certificate, and it MUST NOT accept a connection
+  without the two checks. It checks no name, no validity time, and no chain
+  of the certificate.
+
+  **[NET-381]** A party that dials a relay in pin form MUST NOT send a server
+  name in the ClientHello. The `Host` header of `NET-280` MUST carry the
+  address and the port of the dial, as `203.0.113.7:9443` or
+  `[2001:db8::7]:9443`. Each other part of the TLS configuration is the one
+  of a link to a relay in name form: the groups of `NET-214` and `NET-215`,
+  no early data, and no resumption (`NET-073`).
+
+  > *Cause.* The descriptor is under the signature of the relay and under
+  > the root of the directory, thus its pin names one certificate with no
+  > certificate authority between them. A certificate is public, thus the
+  > pin alone proves nothing: the signature of the handshake proves that the
+  > peer holds the key. A relay in pin form has no name to send. Its address
+  > is in the signed relay set, thus a ClientHello with no server name tells
+  > an observer nothing new. An operator of such a relay needs no domain, no
+  > certificate of a public CA, and no port 80.
 - **[NET-073]** **Implementations MUST disable 0-RTT** in TLS and in QUIC. A
   replayed `SEND` duplicates a message, and a replayed `ACK` deletes one.
   Resumption tickets are also a linkability vector across networks. To recover
@@ -3105,11 +3140,17 @@ upgrade and by the cell sizes. The two classes send the same cells above L1,
 and the class names no user. The web client is a second class under §3.9.1,
 and this document accepts that under the same trade.
 
-Two properties of the deployment limit the damage from a lost relay. Each relay
-shares its IP address and port 443 with a genuine website, thus one IP address
-does not name one relay (G7, G9). A client pins two ingress relays (Part 10
+Two properties of the deployment limit the damage from a lost relay. Each
+ingress relay shares its IP address and port 443 with a genuine website, thus
+an IP address that a client dials does not name one relay (G7, G9). A client
+pins two ingress relays (Part 10
 §10.6.1), thus the loss of one relay does not stop delivery (U6). UMBRA does not
 claim unblockability (Part 2 §2.5).
+
+A relay of layer 2 or 3 can run with no website, in the pin form of Part 10
+§10.5.3. No client dials such a relay, and the signed relay set lists its
+address. A link to it shows a ClientHello with no server name (`NET-381`),
+and an observer tells that link from a page load.
 
 ## 3.9 Privacy modes
 
@@ -3254,8 +3295,8 @@ UMBRA distributes the relay list as a multi-signed, Merkle-rooted, and
 timestamped manifest. Thus a carrier can deliver the list without trust.
 Part 10 §10.5.5 gives its bytes.
 
-**The HTTPS form.** Carrier 4 and the co-tenant site of a relay (§3.8) give
-the manifest as one HTTP object.
+**The HTTPS form.** Carrier 4 and the co-tenant site of an ingress relay
+(§3.8) give the manifest as one HTTP object.
 
 - **[NET-316]** An HTTPS carrier MUST give the `RelayManifest` at the path
   `/.well-known/umbra/manifest`, as the body of a `200` response with a

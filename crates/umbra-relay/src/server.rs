@@ -2140,6 +2140,22 @@ pub fn tls_acceptor(cert_path: &str, key_path: &str) -> Option<TlsAcceptor> {
         .ok()?;
     let key = PrivateKeyDer::from_pem_file(key_path).ok()?;
 
+    acceptor_of(certs, key)
+}
+
+/// The TLS 1.3 acceptor of a relay in pin form, from its link certificate
+/// (Part 10 `REL-229`).
+pub fn link_acceptor(link: &crate::linkcert::LinkCertificate) -> Option<TlsAcceptor> {
+    let certificate = CertificateDer::from(link.certificate.clone());
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(link.key.to_vec());
+
+    acceptor_of(vec![certificate], PrivateKeyDer::Pkcs8(key))
+}
+
+fn acceptor_of(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Option<TlsAcceptor> {
     let mut config =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_no_client_auth()
@@ -2847,6 +2863,7 @@ mod tests {
             let tls = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
             let dial = Dial {
                 host: "localhost".into(),
+                link_pin: None,
                 addr_v4: Some([127, 0, 0, 1]),
                 addr_v6: None,
                 port,

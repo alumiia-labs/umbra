@@ -241,8 +241,11 @@ pub struct ListedRelay {
     pub addr_v6: [u8; 16],
     /// The port.
     pub port: u16,
-    /// The co-tenant host name.
+    /// The host name, which is empty for a relay in pin form.
     pub host: alloc::string::String,
+    /// The pin of the link certificate of a relay in pin form (Part 10
+    /// `REL-143`).
+    pub link_pin: Option<[u8; 32]>,
     /// ISO 3166-1 alpha-2.
     pub jurisdiction: [u8; 2],
     /// Whether the descriptor offers the attachment role.
@@ -331,6 +334,7 @@ impl RelaySet {
                 addr_v6: descriptor.addr_v6,
                 port: descriptor.port,
                 host: descriptor.host_str().into(),
+                link_pin: descriptor.link_pin(),
                 jurisdiction: descriptor.jurisdiction,
                 has_attachment_role: descriptor.roles & roles::ATTACHMENT != 0,
                 identity_pk: descriptor.identity_pk.to_vec(),

@@ -105,6 +105,7 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
 
     let dial = Dial {
         host: "localhost".to_owned(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),
@@ -168,6 +169,7 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
 
     let dial = Dial {
         host: "localhost".to_owned(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),
@@ -285,6 +287,7 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
 
     let dial = Dial {
         host: "localhost".to_owned(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),

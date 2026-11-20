@@ -25,9 +25,10 @@ use umbra_crypto::{
     x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_relay::{
+    linkcert,
     measurer::{measure, MeasureError, Plan, Target},
     node::{Config, RelayNode},
-    server::{run_relay, tls_acceptor, Carried, OsRng, PACING_MEAN_MS},
+    server::{link_acceptor, run_relay, tls_acceptor, Carried, OsRng, PACING_MEAN_MS},
     store::MemoryStore,
 };
 use umbra_transport::{native, Dial};
@@ -87,12 +88,20 @@ fn relay_at(
         relay_id: [0x10 + layer; 32],
     };
 
+    // A relay of layer 2 or 3 is in pin form (Part 10 `REL-143`), thus the
+    // measurer dials it under the pin of its link certificate.
+    let link = (layer > 1).then(|| linkcert::make().unwrap());
+    let named = if link.is_some() { "" } else { "localhost" };
+
     let target = Target {
         relay_id: held.relay_id,
         ntor_pk: held.s,
         layer,
         dial: Dial {
-            host: "localhost".to_owned(),
+            host: named.to_owned(),
+            link_pin: link
+                .as_ref()
+                .map(|link| native::link_pin(&link.certificate)),
             addr_v4: Some([127, 0, 0, 1]),
             addr_v6: None,
             port: 0,
@@ -124,10 +133,14 @@ fn relay_at(
     }
 
     let port = listener.local_addr().unwrap().port();
+    let acceptor = match &link {
+        Some(link) => link_acceptor(link).unwrap(),
+        None => tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+    };
     tokio::spawn(run_relay(
         node,
         listener,
-        tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        acceptor,
         BTreeMap::new(),
         BTreeMap::new(),
         native::tls_config_with_root_file(CA).unwrap(),

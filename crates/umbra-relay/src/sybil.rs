@@ -672,7 +672,8 @@ fn read_observed(line: &str) -> Option<Observed> {
         asn: words.next()?.parse().ok()?,
         jurisdiction: hex::read_array(words.next()?)?,
         family_id: hex::read_array(words.next()?)?,
-        host: words.next()?.to_owned(),
+        // A relay in pin form has no host name (Part 10 `REL-143`).
+        host: words.next().unwrap_or_default().to_owned(),
     };
 
     words.next().is_none().then_some(relay)
@@ -960,6 +961,9 @@ mod tests {
         assert_eq!(near_distance("a.example", "A.EXAMPLE"), Some(0));
         assert_eq!(near_distance("relay.alice.org", "relay.bob.org"), None);
         assert_eq!(near_distance("", ""), None);
+        // A relay in pin form has no name, thus it is near no relay.
+        assert_eq!(near_distance("", "a.example"), None);
+        assert_eq!(near_distance("a.example", ""), None);
     }
 
     /// One address that holds the relay of `numbers` in turn, one in each
@@ -1044,6 +1048,8 @@ mod tests {
     fn the_history_text_reads_back_and_a_bad_line_refuses_it() {
         let mut relays = set(0..3);
         relays.push(pending(relay(9, 9, "new.example")));
+        // A relay in pin form has no host name (Part 10 `REL-143`).
+        relays.push(relay(10, 10, ""));
         let history = vec![at(100, set(0..3)), at(101, Vec::new()), at(105, relays)];
 
         let text = history_text(&history);

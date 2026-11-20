@@ -16,6 +16,12 @@
 # An emulator reaches that address too. The debug app takes the same
 # address at its build (android/README.md).
 #
+# The relays 2 and 3 are in pin form (Part 10 REL-143): each one has no host
+# name and no certificate of the test authority. It makes its own link
+# certificate in target/devnet at its first descriptor, and each relay that
+# dials it accepts the certificate of the pin alone (Part 3 NET-380). The
+# other five relays have the name and the certificate of the test authority.
+#
 # Each relay signs its descriptor, and the seven test authorities sign a
 # manifest of the seven (Part 10 §10.5.5). A relay reads its layer from that
 # manifest. The seeds of the relays and of the authorities are in the

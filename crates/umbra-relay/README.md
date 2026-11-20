@@ -51,10 +51,18 @@ comment is for the `next` lines of the other relays.
 
 ### 3. A certificate for each relay
 
-A client checks the certificate against the web roots. Get one for the host
-name of the relay from a public authority, for example with `certbot certonly
---standalone -d relay1.example.org`. The relay reads the chain and the key at
-its start, thus a renewal needs a restart. The queues outlive that restart.
+A client checks the certificate of the relay of layer 1 against the web
+roots. Get one for the host name of that relay from a public authority, for
+example with `certbot certonly --standalone -d relay1.example.org`. The relay
+reads the chain and the key at its start, thus a renewal needs a restart. The
+queues outlive that restart.
+
+No client dials a relay of layer 2 or 3. Under a signed relay manifest
+(section 7) such a relay needs no host name and no certificate of an
+authority: a `link` line takes the place of the `cert` and `key` lines, and
+the `public` line has an empty host. The head of `src/main.rs` gives that
+form. A `next` line names a relay by its host name, thus the three relays of
+this section each have a name.
 
 ### 4. The settings file
 

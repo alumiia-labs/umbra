@@ -13,7 +13,7 @@ use umbra_core::{
             entry_of, keyset_bytes_with, sign_manifest_under, Admission, Listing, GENESIS_ROOT,
         },
         bloc::BlocList,
-        descriptor::{roles, RelayDescriptor, RelayEntry, HOST_LEN},
+        descriptor::{pin_host, roles, RelayDescriptor, RelayEntry, HOST_LEN},
         manifest::{ListedRelay, RelayManifest, RelaySet},
         root::{Consensus, DirectoryKeySet},
     },
@@ -28,9 +28,10 @@ use umbra_crypto::{
 use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
 use umbra_relay::{
     busy::BusyGauge,
+    linkcert,
     node::{Config as RelayConfig, RelayNode},
     placement::placement,
-    server::{run_relay, tls_acceptor, Carried, OhttpForward, OsRng},
+    server::{link_acceptor, run_relay, tls_acceptor, Carried, OhttpForward, OsRng},
     store::{MemoryStore, RelayStore},
 };
 use umbra_transport::{
@@ -128,6 +129,11 @@ pub fn carried_of(
 /// three relays hold the three copies of a chunk.
 pub const IDENTITY_SEEDS: [u8; 7] = [0x65, 0x66, 0x61, 0x68, 0x63, 0x70, 0x62];
 pub const SIGNED_LAYERS: [u8; 7] = [1, 2, 3, 2, 3, 1, 3];
+/// The relays in pin form (Part 10 `REL-143`), by their place in
+/// [`IDENTITY_SEEDS`]: one of layer 2 and one of layer 3. Each other relay
+/// has the name of the test authority. A chain thus crosses links of the two
+/// forms.
+pub const PIN_FORM: [usize; 2] = [1, 2];
 
 /// A network of relays under a signed manifest, on sockets of this machine.
 pub struct SignedNetwork {
@@ -210,14 +216,20 @@ pub fn start_signed_network_tuned(
     let mut listeners = Vec::new();
     let mut entries = Vec::new();
     let mut identities = Vec::new();
+    let mut links = Vec::new();
     for (index, seed) in IDENTITY_SEEDS.iter().enumerate() {
         let number = index as u8 + 1;
         let address = [127, number, 0, 1];
         let port = at.and_then(|ports| ports.get(index).copied()).unwrap_or(0);
         let listener = bind_at(relays, address, port);
         let (relay, static_secret) = relay_static(number);
+        let link = PIN_FORM.contains(&index).then(|| linkcert::make().unwrap());
         let mut host = [0u8; HOST_LEN];
         host[..9].copy_from_slice(b"localhost");
+        if let Some(link) = &link {
+            host = pin_host(&native::link_pin(&link.certificate));
+        }
+        links.push(link);
         let is_ingress = SIGNED_LAYERS[index] == 1;
         let descriptor = RelayDescriptor {
             relay_id: [0; 32],
@@ -289,8 +301,8 @@ pub fn start_signed_network_tuned(
         .iter()
         .map(|listener| listener.local_addr().unwrap().port())
         .collect();
-    for (listener, (relay_id, static_key, static_secret, seed)) in
-        listeners.into_iter().zip(identities)
+    for ((listener, link), (relay_id, static_key, static_secret, seed)) in
+        listeners.into_iter().zip(links).zip(identities)
     {
         let placed = placement(&manifest, &keyset, &relay_id, &static_key, now).unwrap();
         layers.push(placed.layer);
@@ -348,10 +360,14 @@ pub fn start_signed_network_tuned(
         }
         carried.node_busy = busy.clone();
         node_busy.push(busy);
+        let acceptor = match &link {
+            Some(link) => link_acceptor(link).unwrap(),
+            None => tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        };
         relays.spawn(run_relay(
             node,
             listener,
-            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+            acceptor,
             placed.next,
             replicas,
             client_tls.clone(),
@@ -417,6 +433,7 @@ impl TransferSet {
             .clone();
         let guard = Dial {
             host: ingress.host.clone(),
+            link_pin: None,
             addr_v4: Some(ingress.addr_v4),
             addr_v6: None,
             port: ingress.port,

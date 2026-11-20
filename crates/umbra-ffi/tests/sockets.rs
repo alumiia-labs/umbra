@@ -2,6 +2,10 @@
 //! 1.3, and the WebSocket framing: one client invites, the other accepts,
 //! and text travels both ways. A second run of one client resumes the
 //! session of its first run.
+//!
+//! The relay of layer 1 has the name of the test authority. The relays of
+//! layer 2 and 3 are in pin form (Part 10 `REL-143`), thus each chain of
+//! this file crosses two links under a pin (Part 3 `NET-380`).
 
 #![cfg(feature = "sockets-test")]
 #![allow(
@@ -35,8 +39,9 @@ use umbra_crypto::{
 };
 use umbra_ffi::runtime::{run_client, Command, Ended, Persist, Prior, ResumeSlot, Update};
 use umbra_relay::{
+    linkcert::{self, LinkCertificate},
     node::{Config, RelayNode},
-    server::{run_relay, tls_acceptor, Carried},
+    server::{link_acceptor, run_relay, tls_acceptor, Carried},
     store::MemoryStore,
 };
 use umbra_transport::{native, Dial};
@@ -74,6 +79,7 @@ fn relay_static(layer: u8) -> (RelayStatic, StaticSecret) {
 fn localhost(port: u16) -> Dial {
     Dial {
         host: "localhost".into(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port,
@@ -308,46 +314,13 @@ impl Persist for Lasting {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
-    let mut listeners = Vec::new();
-    let mut ports = Vec::new();
-    for _ in 0..3 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        ports.push(listener.local_addr().unwrap().port());
-        listeners.push(listener);
-    }
+    let (listeners, ports) = bind_three().await;
+    let links = three_links();
+    let dials = dials_of(&ports, &links);
 
     // The chains that each relay opened, which its node counts at each
     // second.
-    let builds: Vec<Arc<AtomicU64>> = (0..3).map(|_| Arc::default()).collect();
-    for (index, listener) in listeners.into_iter().enumerate() {
-        let layer = index as u8 + 1;
-        let (relay, static_secret) = relay_static(layer);
-        let mut node = RelayNode::new(Config {
-            relay,
-            static_secret,
-            layer,
-            chunk_capacity: 1 << 26,
-        });
-        node.count_builds_into(builds[index].clone());
-        let mut next_hops = BTreeMap::new();
-        if layer < 3 {
-            next_hops.insert(
-                relay_static(layer + 1).0.relay_id,
-                localhost(ports[index + 1]),
-            );
-        }
-        tokio::spawn(run_relay(
-            node,
-            listener,
-            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
-            next_hops,
-            BTreeMap::new(),
-            client_tls.clone(),
-            DEPLOYED_PACING_MS,
-            Box::new(MemoryStore::default()),
-            Carried::default(),
-        ));
-    }
+    let builds = spawn_relays(listeners, &links, &dials, &client_tls, DEPLOYED_PACING_MS);
 
     let built = || -> Vec<u64> {
         builds
@@ -494,10 +467,10 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
     assert_eq!(built(), before);
 }
 
-/// Three relay servers on localhost, one of each layer, and their ports.
-async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) -> Vec<u16> {
-    // Each listener binds before a relay starts, thus the dial of a lower
-    // layer at its start finds a port that accepts.
+/// Three listeners on localhost, and their ports. Each listener binds
+/// before a relay starts, thus the dial of a lower layer at its start finds
+/// a port that accepts.
+async fn bind_three() -> (Vec<TcpListener>, Vec<u16>) {
     let mut listeners = Vec::new();
     let mut ports = Vec::new();
     for _ in 0..3 {
@@ -506,26 +479,67 @@ async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) ->
         listeners.push(listener);
     }
 
+    (listeners, ports)
+}
+
+/// The link certificate of the relay of each layer. The relay of layer 1
+/// has none: a client dials it by the name of the test authority.
+fn three_links() -> Vec<Option<LinkCertificate>> {
+    (1..=3u8)
+        .map(|layer| (layer > 1).then(|| linkcert::make().unwrap()))
+        .collect()
+}
+
+/// How the relay of the layer before dials each relay: by its name, or by
+/// the pin of its link certificate.
+fn dials_of(ports: &[u16], links: &[Option<LinkCertificate>]) -> Vec<Dial> {
+    let dial = |(port, link): (&u16, &Option<LinkCertificate>)| match link {
+        Some(link) => Dial {
+            host: String::new(),
+            link_pin: Some(native::link_pin(&link.certificate)),
+            ..localhost(*port)
+        },
+        None => localhost(*port),
+    };
+
+    ports.iter().zip(links).map(dial).collect()
+}
+
+/// Starts one relay of each layer. The relay of each layer dials the next
+/// one at `dials`. The result counts the chains that each relay opened.
+fn spawn_relays(
+    listeners: Vec<TcpListener>,
+    links: &[Option<LinkCertificate>],
+    dials: &[Dial],
+    client_tls: &Arc<native::ClientConfig>,
+    pacing_ms: u64,
+) -> Vec<Arc<AtomicU64>> {
+    let builds: Vec<Arc<AtomicU64>> = (0..3).map(|_| Arc::default()).collect();
+
     for (index, listener) in listeners.into_iter().enumerate() {
         let layer = index as u8 + 1;
         let (relay, static_secret) = relay_static(layer);
-        let node = RelayNode::new(Config {
+        let mut node = RelayNode::new(Config {
             relay,
             static_secret,
             layer,
             chunk_capacity: 1 << 26,
         });
+        node.count_builds_into(builds[index].clone());
+
         let mut next_hops = BTreeMap::new();
         if layer < 3 {
-            next_hops.insert(
-                relay_static(layer + 1).0.relay_id,
-                localhost(ports[index + 1]),
-            );
+            next_hops.insert(relay_static(layer + 1).0.relay_id, dials[index + 1].clone());
         }
+        let acceptor = match &links[index] {
+            Some(link) => link_acceptor(link).unwrap(),
+            None => tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+        };
+
         tokio::spawn(run_relay(
             node,
             listener,
-            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
+            acceptor,
             next_hops,
             BTreeMap::new(),
             client_tls.clone(),
@@ -535,7 +549,67 @@ async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) ->
         ));
     }
 
+    builds
+}
+
+/// Three relay servers on localhost, one of each layer, and their ports.
+async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) -> Vec<u16> {
+    let (listeners, ports) = bind_three().await;
+    let links = three_links();
+    let dials = dials_of(&ports, &links);
+    spawn_relays(listeners, &links, &dials, client_tls, pacing_ms);
+
     ports
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_refuses_a_next_hop_whose_certificate_is_not_the_one_of_its_pin() {
+    let client_tls = native::tls_config_with_root_file(CA).unwrap();
+    let (listeners, ports) = bind_three().await;
+    let links = three_links();
+
+    // The relay of layer 1 holds the pin of another certificate for the
+    // relay of layer 2: the relay at that address is not the one that the
+    // descriptor names.
+    let mut dials = dials_of(&ports, &links);
+    let other = linkcert::make().unwrap();
+    dials[1].link_pin = Some(native::link_pin(&other.certificate));
+    let builds = spawn_relays(listeners, &links, &dials, &client_tls, PACING_MEAN_MS);
+
+    let path = [relay_static(1).0, relay_static(2).0, relay_static(3).0];
+    let node = ClientNode::new(path, RootIdentity::new(Secret::new([0x47; 32])));
+    let (_commands, runtime_commands) = mpsc::unbounded_channel();
+    let (runtime_updates, mut updates) = mpsc::unbounded_channel();
+    let (keeps, _kept) = mpsc::unbounded_channel();
+    tokio::spawn(run_client(
+        node,
+        localhost(ports[0]),
+        client_tls.clone(),
+        runtime_commands,
+        runtime_updates,
+        Box::new(Kept(keeps)),
+        None,
+    ));
+
+    // The relay of layer 1 opens the chains of the client. Each `EXTEND`
+    // to layer 2 needs the link that the pin refuses, thus the relay of
+    // layer 2 opens no chain and no circuit gets ready.
+    let wait = Duration::from_secs(6);
+    let online = timeout(wait, async {
+        loop {
+            match updates.recv().await {
+                Some(Update::Online) => break true,
+                Some(_) => {}
+                None => break false,
+            }
+        }
+    });
+    assert!(!online.await.unwrap_or(false));
+
+    let built = |index: usize| builds[index].load(Ordering::Relaxed);
+    assert!(built(0) > 0);
+    assert_eq!(built(1), 0);
+    assert_eq!(built(2), 0);
 }
 
 /// The store of an existing device through two runs: the stored form of

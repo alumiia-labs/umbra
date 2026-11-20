@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.58.0
+**Version:** 0.59.0
 **Date:** 2026-11-19
 
 ---
@@ -1277,7 +1277,7 @@ RelayDescriptor {
     addr_v4          [4]u8       // 0.0.0.0 when the relay has no IPv4 address
     addr_v6          [16]u8      // all zero when the relay has no IPv6 address
     port             u16
-    host             [64]u8      // the co-tenant host name of Part 3 §3.8, ASCII, zero-padded
+    host             [64]u8      // the name form or the pin form of REL-143
     asn              u32
     jurisdiction     [2]u8       // ISO 3166-1 alpha-2
     family_id        [32]u8      // SHA3-256 over the family certificate of 10.6
@@ -1309,21 +1309,51 @@ preimage, and Part 5 §5.11 holds the label:
 "umbra/v1/relay-descriptor" || the descriptor bytes up to and not including sig
 ```
 
-**[REL-143]** A relay MUST set `host` to the DNS name that the TLS
-certificate of its co-tenant site names, in ASCII, with zero bytes after the
-name. **[REL-144]** A client MUST reject a descriptor whose `host` is empty,
-holds a byte outside the DNS name characters, or holds a non-zero byte after
-a zero byte. The DNS name characters are the ASCII letters, the digits, the
+**[REL-143]** A relay MUST set `host` to the name form or to the pin form of
+this table:
+
+| Form | Byte 0 | The bytes after it |
+| --- | --- | --- |
+| Name form | The first character of the name | The DNS name that the TLS certificate of the relay names, in ASCII, and then zero bytes. |
+| Pin form | `0x00` | Bytes 1 to 32 hold the pin: the SHA3-256 of the DER encoding of the link certificate of the relay. Bytes 33 to 63 are zero. |
+
+**[REL-144]** A client MUST reject a descriptor whose `host` is in neither
+form. A name form holds no byte outside the DNS name characters and no
+non-zero byte after a zero byte. A pin form holds a pin that is not 32 zero
+bytes, and no non-zero byte after the pin. Thus a `host` of 64 zero bytes is
+in neither form. The DNS name characters are the ASCII letters, the digits, the
 hyphen, and the dot between two labels. A label is 1 to 63 characters, and
 it starts and ends with a letter or a digit. Part 3 rule `NET-282` verifies
-the certificate against that name. **[REL-224]** A client MUST reject a
+the certificate against the name, and Part 3 rule `NET-380` verifies it
+against the pin. **[REL-224]** A client MUST reject a
 descriptor whose `port` is 0, and one whose `addr_v4` and `addr_v6` are both
 zero. No party reaches such a relay.
 
-> *Cause.* Part 3 §3.8 puts the relay behind the reverse proxy of a real site
-> under a public CA certificate, and a client that verifies that certificate
-> needs the name it carries. Without the field a client either skips the
-> check or holds a name from outside the signed descriptor.
+**[REL-226]** A relay that offers the ingress role (`roles` bit 2) MUST use
+the name form. **[REL-227]** A client MUST reject a descriptor in pin form
+whose `roles` bit 2 is set. **[REL-228]** A client MUST reject an entry of
+§10.5.4 whose `flags` bit 0 is set and whose descriptor is in pin form. Thus
+each relay that a client dials has a name, and a client holds no pin check.
+
+**[REL-229]** A relay in pin form MUST give the certificate of its pin as the
+end-entity certificate of each TLS handshake on its listener. The link
+certificate is an X.509 version 3 certificate whose key signs a TLS 1.3
+handshake. It needs no chain to a CA, and no party reads its names or its
+validity. A new certificate has a new pin, thus it needs a new descriptor.
+The relay makes the certificate and its key one time and keeps them with
+its state.
+
+> *Cause.* A client dials an ingress relay alone. Part 3 §3.8 puts that
+> relay behind the reverse proxy of a real site under a public CA
+> certificate, and a client that verifies that certificate needs the name
+> it carries. Without the field a client either skips the check or holds a
+> name from outside the signed descriptor. A relay of layer 2 or 3 takes
+> connections from relays, measurers, and directory authorities alone, and
+> each of them holds its signed descriptor. The pin binds the TLS key of
+> the relay to that descriptor with no certificate authority. Thus the
+> operator of such a relay needs no domain, no public CA, and no port 80.
+> The field keeps its width, thus a descriptor in name form is the same
+> bytes as before the pin form.
 
 **[REL-049]** A relay MUST set `relay_id` to `SHA3-256(identity_pk)`.
 **[REL-050]** A client MUST reject a descriptor whose `relay_id` differs from
@@ -1665,7 +1695,8 @@ the root adds 17 KB to 24 KB.
   of an entry costs an ML-DSA-65 verification, and a carrier must not spend
   that work of a client under a root that no authority signed.
 - **[REL-147]** A client MUST reject the whole manifest when one entry fails
-  `REL-050`, `REL-051`, `REL-057` or `REL-144`, when two entries are not in
+  `REL-050`, `REL-051`, `REL-057`, `REL-144`, `REL-227` or `REL-228`, when
+  two entries are not in
   ascending order of `relay_id`, when a `step_count` is above 16, or when a
   `side` is not `0x00` or `0x01`.
 
@@ -2017,7 +2048,8 @@ or ingress) is `SYBIL_CHURN_SHARE` of the relay set, and `SYBIL_CHURN_FLOOR`
 at the least. The uptime technique and the Levenshtein technique give no alert
 for relays of one `operator_id` or one `family_id`, because that control is
 declared. The Levenshtein technique reads `host`, the one descriptor field of
-free text.
+free text. A relay in pin form has no name, and the technique compares no
+such relay.
 
 Add active probing with loop cover. Six of the Sybil groups in the USENIX 2016
 study were invisible to a passive descriptor analysis.

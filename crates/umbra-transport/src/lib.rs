@@ -31,13 +31,16 @@ pub mod ndr;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod directory;
 
-/// Where a client connects: the co-tenant host name of a relay and one of
-/// its addresses, from the descriptor of Part 10 §10.5.3.
+/// Where a party connects: the host name or the pin of a relay and its
+/// addresses, from the descriptor of Part 10 §10.5.3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dial {
     /// The host name that the TLS certificate names and the `Host` header
-    /// carries.
+    /// carries. It is empty for a relay in pin form.
     pub host: alloc::string::String,
+    /// The pin of the link certificate of a relay in pin form (Part 3
+    /// `NET-380`). A client dials no such relay, thus it sets `None`.
+    pub link_pin: Option<[u8; 32]>,
     /// The IPv4 address, or `None`.
     pub addr_v4: Option<[u8; 4]>,
     /// The IPv6 address, or `None`.

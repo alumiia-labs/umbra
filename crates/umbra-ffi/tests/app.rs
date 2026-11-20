@@ -147,6 +147,7 @@ const LAYERS: [u8; 5] = [1, 2, 2, 3, 3];
 fn localhost(port: u16) -> Dial {
     Dial {
         host: "localhost".into(),
+        link_pin: None,
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port,
@@ -2439,6 +2440,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         .unwrap();
     let guard = Dial {
         host: ingress.host.clone(),
+        link_pin: None,
         addr_v4: Some(ingress.addr_v4),
         addr_v6: None,
         port: ingress.port,
@@ -2903,6 +2905,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         .unwrap();
     let guard = Dial {
         host: ingress.host.clone(),
+        link_pin: None,
         addr_v4: Some(ingress.addr_v4),
         addr_v6: None,
         port: ingress.port,

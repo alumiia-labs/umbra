@@ -341,8 +341,17 @@ fn show(label: &str, samples: &[f64], total: usize) {
     }
 }
 
+/// The host of a relay, or its address for a relay in pin form, which has
+/// no host (Part 10 `REL-143`).
+fn host(target: &Target) -> String {
+    if target.dial.host.is_empty() {
+        return std::net::Ipv4Addr::from(target.addr_v4).to_string();
+    }
+    target.dial.host.clone()
+}
+
 fn name(target: &Target) -> String {
-    format!("{} (L{})", target.dial.host, target.layer)
+    format!("{} (L{})", host(target), target.layer)
 }
 
 async fn run(arguments: Arguments) -> Result<(), Failure> {
@@ -375,9 +384,9 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
             }
             tokio::time::sleep(PAUSE).await;
         }
-        show(&format!("{} TCP connect", target.dial.host), &tcp, rounds);
+        show(&format!("{} TCP connect", host(target)), &tcp, rounds);
         if is_ingress {
-            show(&format!("{} one-hop build", target.dial.host), &hop, rounds);
+            show(&format!("{} one-hop build", host(target)), &hop, rounds);
         }
     }
 
@@ -405,15 +414,12 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
                 tokio::time::sleep(PAUSE).await;
             }
             show(
-                &format!("{} -> {}", ingress.dial.host, middle.dial.host),
+                &format!("{} -> {}", host(ingress), host(middle)),
                 &leg,
                 rounds,
             );
             if let Some((median, _, _)) = summary(&whole) {
-                half_l2.push((
-                    format!("{} > {}", ingress.dial.host, middle.dial.host),
-                    median,
-                ));
+                half_l2.push((format!("{} > {}", host(ingress), host(middle)), median));
             }
 
             for last in of_layer(3) {
@@ -435,19 +441,13 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
                     tokio::time::sleep(PAUSE).await;
                 }
                 show(
-                    &format!(
-                        "  {} -> {} -> {}",
-                        ingress.dial.host, middle.dial.host, last.dial.host
-                    ),
+                    &format!("  {} -> {} -> {}", host(ingress), host(middle), host(last)),
                     &leg,
                     rounds,
                 );
                 if let Some((median, _, _)) = summary(&whole) {
                     half_l3.push((
-                        format!(
-                            "{} > {} > {}",
-                            ingress.dial.host, middle.dial.host, last.dial.host
-                        ),
+                        format!("{} > {} > {}", host(ingress), host(middle), host(last)),
                         median,
                     ));
                 }

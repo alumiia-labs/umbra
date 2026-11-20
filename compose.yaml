@@ -1,6 +1,10 @@
 # One UMBRA relay on your own machine: a home server, a homelab, or a VPS.
 # deploy/relay/README.md gives each step.
 #
+# A middle relay or an exit relay needs no DNS name, no certificate of a
+# public authority, and no port 80: leave UMBRA_HOST empty. An entry relay
+# needs a name, and certbot gets its certificate.
+#
 #   cp deploy/relay/relay.env.example .env    # then fill it in
 #   docker compose pull                       # or: docker compose build
 #   docker compose up -d
@@ -19,7 +23,7 @@ name: umbra-relay
 # .env to the name with the digest of the release run:
 # ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>.
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.58.0}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.59.0}
   build:
     context: .
     target: relay
@@ -37,8 +41,10 @@ services:
     volumes:
       - ${UMBRA_ROOT:-./data}:/srv/umbra
 
-  # The certificate of UMBRA_HOST, from Let's Encrypt. It needs port 80.
-  # Remove certbot from COMPOSE_PROFILES when you give your own certificate.
+  # The certificate of UMBRA_HOST, from Let's Encrypt, for a relay with a
+  # host name: each entry relay. It needs port 80. It runs only when
+  # COMPOSE_PROFILES holds certbot. Leave it out for a relay with no
+  # UMBRA_HOST, and when you give your own certificate.
   certbot:
     profiles: [certbot]
     image: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20

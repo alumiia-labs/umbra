@@ -76,6 +76,7 @@ fn layer_of(relay: &ListedRelay) -> u8 {
 fn dial_of(relay: &ListedRelay) -> Dial {
     Dial {
         host: relay.host.clone(),
+        link_pin: relay.link_pin,
         addr_v4: (relay.addr_v4 != [0; 4]).then_some(relay.addr_v4),
         addr_v6: (relay.addr_v6 != [0; 16]).then_some(relay.addr_v6),
         port: relay.port,

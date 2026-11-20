@@ -6,7 +6,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use rustls::{pki_types::ServerName, ClientConfig};
+use rustls::ClientConfig;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -36,6 +36,9 @@ pub struct Url {
     /// of the certificate: an emulator reaches the machine of a test
     /// network at an address of its own.
     pub address: Option<std::net::IpAddr>,
+    /// The pin of the link certificate, for a relay in pin form (Part 3
+    /// `NET-380`). The dial then goes to `address`, and `host` is empty.
+    pub link_pin: Option<[u8; 32]>,
 }
 
 impl Url {
@@ -66,6 +69,7 @@ impl Url {
             port,
             path: path.to_owned(),
             address: None,
+            link_pin: None,
         })
     }
 }
@@ -99,7 +103,8 @@ async fn post_now(
     limit: usize,
 ) -> Result<(u16, Vec<u8>), NativeError> {
     let tcp = connect_any(url).await?;
-    let name = ServerName::try_from(url.host.clone()).map_err(|_| Error::Refused)?;
+    let (config, name, host) =
+        native::link_setup(&url.host, url.link_pin, tcp.peer_addr()?, config)?;
     let mut stream = tokio_rustls::TlsConnector::from(config)
         .connect(name, tcp)
         .await?;
@@ -111,10 +116,9 @@ async fn post_now(
         .map(|(name, value)| name.len().saturating_add(value.len()).saturating_add(4))
         .sum();
     let first = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\n\
+        "POST {} HTTP/1.1\r\nHost: {host}\r\nContent-Type: {content_type}\r\n\
          Content-Length: {}\r\nConnection: close\r\n",
         url.path,
-        url.host,
         body.len()
     );
     let room = first.len().saturating_add(extra).saturating_add(2);
@@ -486,6 +490,7 @@ mod tests {
                 port: 8443,
                 path: "/up/abc?x=1".into(),
                 address: None,
+                link_pin: None,
             })
         );
         assert_eq!(Url::parse("https://127.1.0.1").unwrap().path, "/");

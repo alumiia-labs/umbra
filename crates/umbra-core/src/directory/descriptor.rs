@@ -49,7 +49,8 @@ pub struct RelayDescriptor<'a> {
     pub addr_v6: [u8; 16],
     /// The port.
     pub port: u16,
-    /// The co-tenant host name, ASCII, zero-padded.
+    /// The name form or the pin form of Part 10 §10.5.3: a DNS name in
+    /// ASCII, zero-padded, or the pin of the link certificate.
     pub host: [u8; HOST_LEN],
     /// The autonomous system.
     pub asn: u32,
@@ -69,8 +70,32 @@ pub struct RelayDescriptor<'a> {
     pub sig: &'a [u8],
 }
 
+/// The width of the pin of a link certificate.
+pub const PIN_LEN: usize = 32;
+
+/// The `host` field of a descriptor in pin form (`REL-143`): a zero byte,
+/// the pin, and zero bytes.
+pub fn pin_host(pin: &[u8; PIN_LEN]) -> [u8; HOST_LEN] {
+    let mut host = [0u8; HOST_LEN];
+    if let Some(room) = host.get_mut(1..=PIN_LEN) {
+        room.copy_from_slice(pin);
+    }
+    host
+}
+
+/// The pin of a `host` in pin form, or `None` for each other field. A pin
+/// of zero bytes is no pin, thus a field of zero bytes has no form.
+fn pin_of(host: &[u8; HOST_LEN]) -> Option<[u8; PIN_LEN]> {
+    let (mark, rest) = host.split_first()?;
+    let (pin, pad) = rest.split_at_checked(PIN_LEN)?;
+    let pin: [u8; PIN_LEN] = pin.try_into().ok()?;
+
+    let is_pin = *mark == 0 && pin != [0; PIN_LEN] && pad.iter().all(|b| *b == 0);
+    is_pin.then_some(pin)
+}
+
 /// Whether `host` is a DNS name with zero bytes after it (`REL-144`).
-fn host_ok(host: &[u8; HOST_LEN]) -> bool {
+fn name_ok(host: &[u8; HOST_LEN]) -> bool {
     let name_len = host.iter().position(|b| *b == 0).unwrap_or(HOST_LEN);
     let (name, pad) = host.split_at(name_len);
     if !pad.iter().all(|b| *b == 0) {
@@ -94,7 +119,13 @@ fn label_ok(label: &[u8]) -> bool {
 }
 
 impl<'a> RelayDescriptor<'a> {
-    /// The host name as text.
+    /// The pin of the link certificate of a descriptor in pin form
+    /// (`REL-143`), or `None` for a descriptor in name form.
+    pub fn link_pin(&self) -> Option<[u8; PIN_LEN]> {
+        pin_of(&self.host)
+    }
+
+    /// The host name as text. It is empty for a descriptor in pin form.
     pub fn host_str(&self) -> &str {
         let len = self.host.iter().position(|b| *b == 0).unwrap_or(HOST_LEN);
         core::str::from_utf8(self.host.get(..len).unwrap_or(&[])).unwrap_or("")
@@ -132,7 +163,8 @@ impl<'a> RelayDescriptor<'a> {
     }
 
     /// Reads a descriptor, checks `relay_id` against `identity_pk`
-    /// (`REL-050`), the host (`REL-144`), and the signature (`REL-051`).
+    /// (`REL-050`), the host (`REL-144`, `REL-227`), and the signature
+    /// (`REL-051`).
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         if bytes.len() != DESCRIPTOR_LEN {
             return Err(Error::Malformed);
@@ -162,10 +194,16 @@ impl<'a> RelayDescriptor<'a> {
         };
         r.finish()?;
 
-        if out.relay_id != sha3_256(&[out.identity_pk])
-            || !host_ok(&out.host)
-            || out.capacity_class > 3
-        {
+        if out.relay_id != sha3_256(&[out.identity_pk]) || out.capacity_class > 3 {
+            return Err(Error::Malformed);
+        }
+        // REL-227: a client dials an ingress relay under the public CA
+        // roots, thus a relay that offers that role has a name.
+        let host_ok = match out.link_pin() {
+            Some(_) => out.roles & roles::INGRESS_OFFERED == 0,
+            None => name_ok(&out.host),
+        };
+        if !host_ok {
             return Err(Error::Malformed);
         }
         // REL-224: no client reaches a relay with no address or no port.
@@ -316,6 +354,11 @@ impl<'a> RelayEntry<'a> {
         if out.class > 3 || out.class > out.descriptor.capacity_class {
             return Err(Error::Malformed);
         }
+        // REL-228: a client dials hop 1 by its name, under the public CA
+        // roots. A relay in pin form has no name.
+        if out.ingress() && out.descriptor.link_pin().is_some() {
+            return Err(Error::Malformed);
+        }
 
         // REL-151: layer 3 needs the queue role and the chain role, it is no
         // ingress, and no other bit exists. REL-157: a pending entry names
@@ -370,10 +413,23 @@ pub(crate) mod tests {
         asn: u32,
         flags: u8,
     ) -> alloc::vec::Vec<u8> {
-        let key = SigningKey::from_seed(Secret::new([seed; 32]));
-        let pk = key.verifying_key().to_bytes();
         let mut host = [0u8; HOST_LEN];
         host[..13].copy_from_slice(b"relay.example");
+        let relay_roles = roles::QUEUE | roles::CHAIN | roles::INGRESS_OFFERED;
+        entry_with(seed, jurisdiction, asn, flags, host, relay_roles)
+    }
+
+    /// The entry of [`entry_bytes`] with the given `host` and roles.
+    fn entry_with(
+        seed: u8,
+        jurisdiction: [u8; 2],
+        asn: u32,
+        flags: u8,
+        host: [u8; HOST_LEN],
+        relay_roles: u8,
+    ) -> alloc::vec::Vec<u8> {
+        let key = SigningKey::from_seed(Secret::new([seed; 32]));
+        let pk = key.verifying_key().to_bytes();
         let mut desc = RelayDescriptor {
             relay_id: sha3_256(&[&pk]),
             identity_pk: &pk,
@@ -386,7 +442,7 @@ pub(crate) mod tests {
             jurisdiction,
             family_id: [seed; 32],
             capacity_class: 3,
-            roles: roles::QUEUE | roles::CHAIN | roles::INGRESS_OFFERED,
+            roles: relay_roles,
             chunk_store_gib: 0,
             valid_after: 1,
             sig: &[0; SIGNATURE_LEN],
@@ -421,6 +477,57 @@ pub(crate) mod tests {
         bad_host[1 + 32 + 1952 + 32 + 4 + 16 + 2] = b' ';
         assert!(RelayEntry::parse(&bad_host).is_err());
         assert!(RelayEntry::parse(&bytes[..ENTRY_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn a_descriptor_in_pin_form_parses_and_offers_no_ingress() {
+        let chain = roles::QUEUE | roles::CHAIN;
+        let pin_form = |pin: [u8; PIN_LEN], relay_roles: u8, flags: u8| {
+            entry_with(1, *b"DE", 3_320, flags, pin_host(&pin), relay_roles)
+        };
+
+        // REL-143: the two forms parse, and each gives its own value.
+        let bytes = pin_form([0xA7; PIN_LEN], chain, 0);
+        let pinned = RelayEntry::parse(&bytes).unwrap();
+        assert_eq!(pinned.descriptor.link_pin(), Some([0xA7; PIN_LEN]));
+        assert_eq!(pinned.descriptor.host_str(), "");
+        let named = entry_bytes(1, *b"DE", 3_320, 0);
+        let named = RelayEntry::parse(&named).unwrap();
+        assert_eq!(named.descriptor.link_pin(), None);
+        assert_eq!(named.descriptor.host_str(), "relay.example");
+
+        // REL-227: the pin form with the ingress offer.
+        let offers = pin_form([0xA7; PIN_LEN], chain | roles::INGRESS_OFFERED, 0);
+        assert!(RelayEntry::parse(&offers).is_err());
+
+        // REL-144: a field of zero bytes, thus also a pin of zero bytes.
+        assert!(RelayEntry::parse(&pin_form([0; PIN_LEN], chain, 0)).is_err());
+
+        // REL-144: a byte that is not zero after the pin.
+        let mut long = pin_host(&[0xA7; PIN_LEN]);
+        long[HOST_LEN - 1] = 1;
+        let long = entry_with(1, *b"DE", 3_320, 0, long, chain);
+        assert!(RelayEntry::parse(&long).is_err());
+
+        // A pin whose first byte is zero is a pin.
+        let mut low = [0xA7; PIN_LEN];
+        low[0] = 0;
+        let low_bytes = pin_form(low, chain, 0);
+        let low_entry = RelayEntry::parse(&low_bytes).unwrap();
+        assert_eq!(low_entry.descriptor.link_pin(), Some(low));
+    }
+
+    #[test]
+    fn a_client_refuses_a_relay_in_pin_form_as_hop_1() {
+        // REL-228: the descriptor is valid, and the flag of the authority
+        // makes it hop 1. A client has no name to verify.
+        let chain = roles::QUEUE | roles::CHAIN;
+        let host = pin_host(&[0xA7; PIN_LEN]);
+        let entry = |flags: u8| entry_with(1, *b"DE", 3_320, flags, host, chain);
+
+        assert!(RelayEntry::parse(&entry(flags::INGRESS)).is_err());
+        assert!(RelayEntry::parse(&entry(0)).is_ok());
+        assert!(RelayEntry::parse(&entry(flags::LAYER_3)).is_ok());
     }
 
     #[test]

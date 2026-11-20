@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.58.0
+**Version:** 0.59.0
 **Date:** 2026-11-19
 
 ---
@@ -287,7 +287,7 @@ names the crates, thus an implementer can build the L1 layer of Part 3 §3.8.
 | QUIC | `quinn` 0.11 | over the same `rustls` configuration |
 | HTTP/1.1 Upgrade, and the WebSocket frame | in-workspace | Part 6 §6.2.1 puts one capsule in one frame, and no crate is needed |
 | TLS on the runtime | `tokio-rustls` 0.26 | the adapter between `rustls` and `tokio`, and no other function |
-| CA roots | `webpki-roots` 1 | the Mozilla root set, for the certificate check of Part 3 rule `NET-282` |
+| CA roots | `webpki-roots` 1 | the Mozilla root set, for the certificate check of Part 3 rule `NET-282`: each link to a relay in name form, thus each link of a client to an ingress relay. A link to a relay in pin form reads no root (Part 3 rule `NET-380`) |
 | Async runtime | `tokio` 1 | the `rt-multi-thread`, `net`, `time`, `sync`, `io-util`, and `macros` features only |
 
 - **[IMP-066]** The L1 stack MUST use `rustls` with the `aws-lc-rs` provider.

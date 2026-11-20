@@ -20,13 +20,17 @@ use std::{
 };
 
 use rustls::{
-    client::{EchGreaseConfig, EchMode, Resumption},
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        EchGreaseConfig, EchMode, Resumption,
+    },
     crypto::{
         aws_lc_rs::{self, hpke, kx_group},
         hpke::Hpke,
+        verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
     },
-    pki_types::ServerName,
-    RootCertStore,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
@@ -142,6 +146,92 @@ fn tls_config_under(roots: RootCertStore) -> Result<Arc<ClientConfig>, NativeErr
     config.resumption = Resumption::disabled();
     config.enable_early_data = false;
     Ok(Arc::new(config))
+}
+
+/// The pin of a link certificate: SHA3-256 of its DER (Part 10 `REL-143`).
+pub fn link_pin(certificate_der: &[u8]) -> [u8; 32] {
+    umbra_crypto::hash::sha3_256(&[certificate_der])
+}
+
+/// The certificate check of a link to a relay in pin form (`NET-380`). The
+/// pin is under the signature of the descriptor, thus it names one key and
+/// no certificate authority has a part in the check.
+#[derive(Debug)]
+struct PinVerifier {
+    pin: [u8; 32],
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for PinVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if !umbra_crypto::ct_eq(&link_pin(end_entity), &self.pin) {
+            let cause = rustls::CertificateError::ApplicationVerificationFailure;
+            return Err(rustls::Error::InvalidCertificate(cause));
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    // The two signature checks are the ones of the standard verifier. With
+    // no such check, a party that holds the certificate and not its key
+    // passes the pin.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// The TLS setup of one link to the relay at `addr`: the configuration,
+/// the server name, and the value of the `Host` header.
+///
+/// A relay in name form takes `config` as it is, and its host name. A relay
+/// in pin form takes a copy of `config` with the pin check in the place of
+/// the roots, and its address as the name, thus the ClientHello holds no
+/// server name (`NET-381`). Each other part of the configuration is the
+/// same.
+pub fn link_setup(
+    host: &str,
+    link_pin: Option<[u8; 32]>,
+    addr: SocketAddr,
+    config: Arc<ClientConfig>,
+) -> Result<(Arc<ClientConfig>, ServerName<'static>, String), NativeError> {
+    let Some(pin) = link_pin else {
+        let name = ServerName::try_from(host.to_owned()).map_err(|_| Error::Refused)?;
+        return Ok((config, name, host.to_owned()));
+    };
+
+    let mut pinned = (*config).clone();
+    let algorithms = pinned.crypto_provider().signature_verification_algorithms;
+    pinned
+        .dangerous()
+        .set_certificate_verifier(Arc::new(PinVerifier { pin, algorithms }));
+
+    let name = ServerName::IpAddress(addr.ip().into());
+    Ok((Arc::new(pinned), name, addr.to_string()))
 }
 
 /// How long a dial waits for one address before it turns to the next one.
@@ -367,15 +457,14 @@ async fn open_carried(
     path: &str,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>), NativeError> {
     let tcp = connect_tcp(dial).await?;
-    let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
+    let (config, name, host) = link_setup(&dial.host, dial.link_pin, tcp.peer_addr()?, config)?;
     let mut stream = tokio_rustls::TlsConnector::from(config)
         .connect(name, tcp)
         .await?;
 
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/octet-stream\r\n\
-         Connection: close\r\n\r\n",
-        dial.host
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/octet-stream\r\n\
+         Connection: close\r\n\r\n"
     );
 
     stream.write_all(request.as_bytes()).await?;
@@ -832,14 +921,14 @@ impl TcpLink {
                 .map_err(|_| NativeError::Timeout)??
         };
         tcp.set_nodelay(true)?;
-        let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
+        let (config, name, host) = link_setup(&dial.host, dial.link_pin, addr, config)?;
         let connector = tokio_rustls::TlsConnector::from(config);
         let socket = Coalesced::new(tcp);
         let state = socket.state();
         let mut stream = connector.connect(name, socket).await?;
 
         stream
-            .write_all(upgrade::request(&dial.host, &key).as_bytes())
+            .write_all(upgrade::request(&host, &key).as_bytes())
             .await?;
         // A TLS stream can hold a written record until its flush.
         stream.flush().await?;
@@ -1004,6 +1093,7 @@ impl QuicLink {
         // alone and has no turn to the second family.
         let addr = socket_addrs(dial).next().ok_or(Error::Refused)?;
 
+        let (config, name, _) = link_setup(&dial.host, dial.link_pin, addr, config)?;
         let mut tls = (*config).clone();
         tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
@@ -1026,7 +1116,7 @@ impl QuicLink {
         endpoint.set_default_client_config(client_config);
 
         let connecting = endpoint
-            .connect(addr, &dial.host)
+            .connect(addr, &name.to_str())
             .map_err(|e| NativeError::Quic(e.to_string()))?;
         let connection = connecting
             .await
@@ -1688,6 +1778,7 @@ mod tests {
 
         let dial = Dial {
             host: "relay.example".into(),
+            link_pin: None,
             addr_v4: None,
             addr_v6: None,
             port: 443,
@@ -1744,6 +1835,7 @@ mod tests {
     fn a_dial_holds_its_addresses_with_ipv4_first() {
         let mut dial = Dial {
             host: "relay.example".into(),
+            link_pin: None,
             addr_v4: Some([192, 0, 2, 1]),
             addr_v6: Some([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             port: 443,
@@ -1776,6 +1868,7 @@ mod tests {
 
         let mut dial = Dial {
             host: "relay.example".into(),
+            link_pin: None,
             addr_v4: Some([127, 0, 0, 1]),
             addr_v6: Some(std::net::Ipv6Addr::LOCALHOST.octets()),
             port,

@@ -25,8 +25,11 @@ relay:
   role: middle
   # 0 = 100, 1 = 250, 2 = 500, 3 = 1000 Mbit/s, in both directions.
   class: 0
-  # A DNS name with an A record to the public IPv4 address, and that address.
+  # A DNS name with an A record to the public IPv4 address, for an entry
+  # relay alone. Empty for a middle or an exit relay: the relay then makes
+  # its own certificate, and it needs no name, no certbot, and no port 80.
   host: ""
+  # The public IPv4 address of the node.
   address: ""
   # An entry relay takes 443, which needs
   # net.ipv4.ip_unprivileged_port_start=443 on the node.
@@ -50,8 +53,8 @@ chunkCapacity: 1073741824
 root: /srv/umbra-relay
 
 # certbot gets the certificate of relay.host from Let's Encrypt on port 80
-# of the node. Set false, and put cert.pem and key.pem in <root>/tls, for
-# your own certificate.
+# of the node. It runs for a relay with a relay.host alone. Set false, and
+# put cert.pem and key.pem in <root>/tls, for your own certificate.
 certbot: true
 certbotImage: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
 

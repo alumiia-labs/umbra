@@ -21,6 +21,10 @@ A request with the name and the relay_id of an admitted relay replaces its
 descriptor when the new one is not older. That is a new address of the same
 relay.
 
+A middle relay or an exit relay can have no host: its `public` line starts
+with a comma, and its descriptor holds the pin of its link certificate in
+the place of a host name (Part 10 REL-143). An entry relay has a host.
+
 The script stops on a relay name of the settings that does not read, and on
 a name that two relays of the settings hold.
 
@@ -60,6 +64,9 @@ FIELDS = {
     "valid_after": (2147, 8),
 }
 QUEUE, CHAIN, INGRESS = 0x01, 0x02, 0x04
+# The pin form of `host` (Part 10 REL-143): a zero byte, the SHA3-256 of the
+# link certificate, and zero bytes.
+PIN_LEN = 32
 # The role bits that each role needs, and those that it must not have. A
 # relay that offers the ingress role takes no layer 3 (Part 10 REL-060),
 # thus an exit relay must not offer it, and an entry relay takes no queue.
@@ -107,7 +114,8 @@ def check(facts):
         "role": r"entry|middle|exit",
         "class": r"[0-3]",
         # `[0-9]` and not `\d`, which takes each number character of Unicode.
-        "public": r"[A-Za-z0-9.-]+,[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3},[0-9]{1,5}",
+        # An empty host is the pin form of the descriptor (Part 10 REL-143).
+        "public": r"[A-Za-z0-9.-]*,[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3},[0-9]{1,5}",
         # The signer reads a relay line split at commas, and the entry
         # script splits the list at spaces. The owner pastes the value into
         # a YAML line, thus it holds no character that YAML reads as syntax.
@@ -121,7 +129,7 @@ def check(facts):
         if not re.fullmatch(pattern, facts[name]):
             raise ValueError(f"{name}={facts[name]} is not valid")
 
-    _, address, port = facts["public"].split(",")
+    host, address, port = facts["public"].split(",")
     if any(int(part) > 255 for part in address.split(".")):
         raise ValueError(f"public={facts['public']} holds no IPv4 address")
     if not 1 <= int(port) <= 65_535:
@@ -131,6 +139,10 @@ def check(facts):
 
     if facts["role"] == "entry" and (facts["class"] == "0" or not facts["public"].endswith(",443")):
         raise ValueError("an entry relay takes port 443 and class 1 or more")
+    # Part 10 REL-226: a phone verifies the certificate of an entry relay
+    # against its host name.
+    if facts["role"] == "entry" and not host:
+        raise ValueError("an entry relay takes a host name")
 
 
 def read_descriptor(raw):
@@ -143,12 +155,29 @@ def read_descriptor(raw):
     return fields
 
 
+def pin_host(pin):
+    """The `host` field of a descriptor in pin form."""
+    return b"\0" + pin + bytes(64 - 1 - PIN_LEN)
+
+
+def link_pin(host):
+    """The pin of a `host` field in pin form, or None for each other field.
+    A pin of zero bytes is no pin."""
+    pin, pad = host[1 : 1 + PIN_LEN], host[1 + PIN_LEN :]
+    if host[0] == 0 and any(pin) and not any(pad):
+        return pin
+    return None
+
+
 def stated_fields(facts):
-    """The fields of the descriptor that the facts of a request state."""
+    """The fields of the descriptor that the facts of a request state. A
+    request with no host states no `host` field: the pin of the descriptor
+    comes from the certificate of the relay."""
     host, address, port = facts["public"].split(",")
+    named = {"host": host.encode().ljust(64, b"\0")} if host else {}
     return {
         "relay_id": bytes.fromhex(facts["relay_id"]),
-        "host": host.encode().ljust(64, b"\0"),
+        **named,
         "addr_v4": bytes(int(part) for part in address.split(".")),
         "port": int(port).to_bytes(2, "big"),
         "asn": int(facts["asn"]).to_bytes(4, "big"),
@@ -166,6 +195,13 @@ def compare(facts, descriptor):
         raise ValueError("the descriptor states another " + ", ".join(differ) + " than the request")
 
     roles = descriptor["roles"][0]
+    if "host" not in stated:
+        if link_pin(descriptor["host"]) is None:
+            raise ValueError("the request states no host, and the descriptor holds no pin of a link certificate")
+        # Part 10 REL-227: each client rejects such a descriptor.
+        if roles & INGRESS:
+            raise ValueError("a descriptor in pin form offers the ingress role")
+
     needed, refused = ROLE_BITS[facts["role"]]
     if roles & needed != needed or roles & refused:
         raise ValueError(f"the roles of the descriptor do not fit the role {facts['role']}")
@@ -296,11 +332,13 @@ all:
 """
 
 
-def sample_request(seed, name, valid_after=1, stated=None, **changes):
+def sample_request(seed, name, valid_after=1, stated=None, pin=None, roles=None, **changes):
     """A join request as entry.sh writes it, with a descriptor of the same
     facts. `changes` go into the facts of both, and `stated` into the
-    request alone. The signature stays zero: the signer checks it, and this
-    script does not."""
+    request alone. A request with no host gets a descriptor in pin form,
+    with `pin` or a pin from the seed. `roles` are the role bits of the
+    descriptor in the place of those of the role. The signature stays zero:
+    the signer checks it, and this script does not."""
     identity = hashlib.shake_256(seed.encode()).digest(FIELDS["identity_pk"][1])
     facts = {
         "name": name,
@@ -317,11 +355,16 @@ def sample_request(seed, name, valid_after=1, stated=None, **changes):
     }
 
     raw = bytearray(DESCRIPTOR_LEN)
+    if pin is None:
+        pin = hashlib.sha3_256(f"link {seed}".encode()).digest()
+    if roles is None:
+        roles = ROLE_BITS[facts["role"]][0]
     fields = {
+        "host": pin_host(pin),
         **stated_fields(facts),
         "version": b"\x01",
         "identity_pk": identity,
-        "roles": bytes([ROLE_BITS[facts["role"]][0]]),
+        "roles": bytes([roles]),
         "valid_after": valid_after.to_bytes(8, "big"),
     }
     for field, value in fields.items():
@@ -372,6 +415,9 @@ def self_test():
     # The cases run in this order against one descriptor directory.
     moved = "relay.example.org,198.51.100.8,443"
     other_port = "relay.example.org,198.51.100.7,9443"
+    named = "relay.example.org,198.51.100.9,9443"
+    no_host = ",198.51.100.9,9443"
+    no_host_443 = ",198.51.100.9,443"
     request_cases = [
         ("a new relay", sample_request("a", "home-2"), "wrote home-2.desc"),
         ("the same request again", sample_request("a", "home-2"), "held home-2.desc"),
@@ -390,6 +436,14 @@ def self_test():
         ("the own operator in quotes", sample_request("c", "home-4", stated={"operator": '"umbra-project"'}), "operator="),
         ("a port above 16 bits", sample_request("c", "home-4", stated={"public": "relay.example.org,198.51.100.7,70000"}), "holds no port"),
         ("an ASN above 32 bits", sample_request("c", "home-4", stated={"asn": "4294967296"}), "above 32 bits"),
+        # The pin form of Part 10 REL-143.
+        ("a middle relay in pin form", sample_request("d", "home-5", role="middle", public=no_host), "wrote home-5.desc"),
+        ("an exit relay in pin form", sample_request("e", "home-7", public=no_host), "wrote home-7.desc"),
+        ("an entry relay with no host", sample_request("f", "home-8", role="entry", public=no_host_443), "takes a host name"),
+        ("no host, and a name in the descriptor", sample_request("f", "home-8", public=named, stated={"public": no_host}), "holds no pin"),
+        ("a host, and a pin in the descriptor", sample_request("f", "home-8", public=no_host, stated={"public": named}), "another host"),
+        ("a pin of zero bytes", sample_request("f", "home-8", public=no_host, pin=bytes(PIN_LEN)), "holds no pin"),
+        ("a pin form with the ingress offer", sample_request("f", "home-8", role="middle", public=no_host, roles=CHAIN | INGRESS), "offers the ingress role"),
     ]
     settings = read_settings(SAMPLE_GROUP_VARS, SAMPLE_INVENTORY)
 

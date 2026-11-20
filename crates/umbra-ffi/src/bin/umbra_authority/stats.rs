@@ -62,6 +62,7 @@ async fn noised_share(
         port: relay.port,
         path: "/stat".into(),
         address: Some(std::net::IpAddr::from(relay.addr_v4)),
+        link_pin: relay.link_pin,
     };
     let tls = super::tls_of(settings).ok()?;
     let (status, answer) = https::post(

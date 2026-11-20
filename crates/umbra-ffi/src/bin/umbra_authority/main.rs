@@ -382,6 +382,7 @@ fn dial_of(relay: &ListedRelay, host_alias: Option<[u8; 4]>) -> Dial {
     };
     Dial {
         host: relay.host.clone(),
+        link_pin: relay.link_pin,
         addr_v4: Some(addr_v4),
         addr_v6: None,
         port: relay.port,

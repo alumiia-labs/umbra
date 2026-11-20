@@ -25,7 +25,7 @@ use umbra_core::{
     directory::{
         bloc::BlocList,
         descriptor::RelayEntry,
-        manifest::{RelayManifest, RelaySet},
+        manifest::{ListedRelay, RelayManifest, RelaySet},
         path::{Candidate, INGRESS_PINS},
         root::{ClockState, Consensus, DirectoryKeySet},
     },
@@ -569,6 +569,7 @@ fn carrier(
     let address: [u8; 4] = ipv4.try_into().map_err(|_| FfiError::Malformed)?;
     let dial = Dial {
         host,
+        link_pin: None,
         addr_v4: Some(address),
         addr_v6: None,
         port,
@@ -769,6 +770,16 @@ fn random_u64() -> u64 {
     u64::from_be_bytes(bytes)
 }
 
+/// The host of a relay as the view of the connection shows it. A relay in
+/// pin form has no host name (Part 10 `REL-143`), thus the view shows its
+/// address. The client dials no such relay (`REL-228`).
+fn shown_host(relay: &ListedRelay) -> String {
+    if relay.link_pin.is_some() {
+        return std::net::Ipv4Addr::from(relay.addr_v4).to_string();
+    }
+    relay.host.clone()
+}
+
 /// The relays of a verified set in the form of a network. A relay with no
 /// IPv4 address stays out, because this client dials IPv4 alone.
 fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
@@ -776,7 +787,7 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
         .iter()
         .filter(|relay| relay.addr_v4 != [0; 4])
         .map(|relay| RelayEndpoint {
-            host: relay.host.clone(),
+            host: shown_host(relay),
             ipv4: relay.addr_v4.to_vec(),
             port: relay.port,
             static_key: relay.ntor_pk.to_vec(),
@@ -2896,6 +2907,7 @@ impl Inner {
 
         let dial = Dial {
             host: guard.host.clone(),
+            link_pin: None,
             addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
             addr_v6: None,
             port: guard.port,
@@ -3769,6 +3781,7 @@ impl Inner {
 
         let dial = Dial {
             host: guard.host.clone(),
+            link_pin: None,
             addr_v4: Some(guard.ipv4.as_slice().try_into().ok()?),
             addr_v6: None,
             port: guard.port,
@@ -6591,6 +6604,7 @@ impl Handle {
         let address = guard.ipv4.as_slice().try_into();
         let dial = Dial {
             host: guard.host.clone(),
+            link_pin: None,
             addr_v4: Some(address.map_err(|_| FfiError::Malformed)?),
             addr_v6: None,
             port: guard.port,
@@ -6965,6 +6979,7 @@ impl Handle {
 
             let dial = Dial {
                 host: guard.host.clone(),
+                link_pin: None,
                 addr_v4: Some(address),
                 addr_v6: None,
                 port: guard.port,

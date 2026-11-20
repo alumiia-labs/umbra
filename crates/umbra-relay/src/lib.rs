@@ -29,6 +29,8 @@ pub mod fcm;
 pub mod hops;
 #[cfg(feature = "native")]
 pub mod issuer_keys;
+#[cfg(feature = "native")]
+pub mod linkcert;
 pub mod loops;
 #[cfg(feature = "native")]
 pub mod measurer;
