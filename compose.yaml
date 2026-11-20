@@ -23,7 +23,7 @@ name: umbra-relay
 # .env to the name with the digest of the release run:
 # ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>.
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.60.2}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.61.0}
   build:
     context: .
     target: relay
@@ -103,7 +103,6 @@ services:
       UMBRA_PUBLIC_ADDRESS: ${UMBRA_ADDRESS:-}
       UMBRA_PUBLIC_PORT: ${UMBRA_PORT:-9443}
       UMBRA_OPERATOR: ${UMBRA_OPERATOR:-}
-      UMBRA_CONTACT: ${UMBRA_CONTACT:-}
       UMBRA_COUNTRY: ${UMBRA_COUNTRY:-}
       UMBRA_ASN: ${UMBRA_ASN:-}
       # 64 zeros: the relay declares no family (Part 10 REL-209).

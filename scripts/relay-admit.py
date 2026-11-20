@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ANSIBLE = ROOT / "deploy/ansible"
 BEGIN = "-----BEGIN UMBRA RELAY REQUEST-----"
 END = "-----END UMBRA RELAY REQUEST-----"
-FACTS = ["name", "role", "class", "public", "operator", "contact", "country", "asn", "family", "relay_id"]
+FACTS = ["name", "role", "class", "public", "operator", "country", "asn", "family", "relay_id"]
 
 # The descriptor of Part 10 §10.5.3: the offset and the width of each field.
 DESCRIPTOR_LEN = 5464
@@ -346,7 +346,6 @@ def sample_request(seed, name, valid_after=1, stated=None, pin=None, roles=None,
         "class": "1",
         "public": "relay.example.org,198.51.100.7,443",
         "operator": "bob",
-        "contact": "bob@example.org",
         "country": "DE",
         "asn": "64496",
         "family": "ab" * 32,
@@ -485,7 +484,7 @@ def main():
         print(f"{target} holds this descriptor already")
 
     address = facts["public"].split(",")[1]
-    print(f"relay_id {facts['relay_id']}, contact {shown(facts['contact'])}")
+    print(f"relay_id {facts['relay_id']}")
     _, _, outside = settings
     same = [name for name, operator in outside if operator == facts["operator"] and name != facts["name"]]
     if same:

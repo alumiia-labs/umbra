@@ -241,9 +241,6 @@ pub fn check_join(text: &str, caller: Caller<'_>) -> Result<Accepted, &'static s
     if caller.own_operator == Some(fact("operator")) {
         return Err("operator is the name of the operator of the network");
     }
-    if fact("contact").is_empty() || fact("contact").len() > 200 {
-        return Err("contact is an address for abuse and legal reports");
-    }
 
     let (need, forbid) = role_bits(fact("role")).ok_or("role is entry, middle or exit")?;
     let class: u8 = fact("class").parse().map_err(|_| "class is 0, 1, 2 or 3")?;
@@ -573,7 +570,6 @@ pub(crate) mod tests {
             ("class", "0".to_owned()),
             ("public", format!(",{ADDRESS},9443")),
             ("operator", "alice".to_owned()),
-            ("contact", "abuse@example.org".to_owned()),
             ("country", "DE".to_owned()),
             ("asn", "64500".to_owned()),
             ("family", hex::write(&[7; 32])),

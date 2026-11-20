@@ -377,8 +377,8 @@ ansible-playbook inbox.yml
 Each request is then in `build/inbox/<relay_id>.request`. A person can also
 open a relay request on GitHub with the same text. Admit a request so:
 
-1. Check the dossier (Part 10 `REL-012`): the operator, the control, the
-   contact, the country, and the AS number of the address (`whois`). Check
+1. Check the dossier (Part 10 `REL-012`): the operator, the control,
+   the country, and the AS number of the address (`whois`). Check
    that no listed relay of another operator has the same family value.
    Set the operator name from the beneficial control of the dossier
    (`REL-128`). It is never `umbra_operator`, and two relays of one control

@@ -399,7 +399,6 @@ relay_id_of() {
 # The request that the network gets: the signed descriptor and the facts of
 # the dossier (Part 10 §10.6). Each value is public.
 relay_join() {
-    need UMBRA_CONTACT
     local relay_id
     relay_id=$(relay_id_of)
 
@@ -409,7 +408,6 @@ relay_join() {
     echo "class=$UMBRA_RELAY_CLASS"
     echo "public=$UMBRA_PUBLIC_HOST,$UMBRA_PUBLIC_ADDRESS,$UMBRA_PUBLIC_PORT"
     echo "operator=$UMBRA_OPERATOR"
-    echo "contact=$UMBRA_CONTACT"
     echo "country=$UMBRA_COUNTRY"
     echo "asn=$UMBRA_ASN"
     echo "family=$UMBRA_FAMILY"
@@ -425,10 +423,6 @@ relay_join() {
 # no more goes there again.
 relay_announce() {
     local again=${1:-} sum relay_id answer state
-    if [ -z "${UMBRA_CONTACT:-}" ]; then
-        say "set UMBRA_CONTACT, and the relay sends its join request by itself"
-        return 0
-    fi
     sum=$(cat "$STATE/relay.desc.sum")
     relay_id=$(relay_id_of)
 

@@ -61,7 +61,6 @@ spec:
             - { name: UMBRA_PUBLIC_ADDRESS, value: {{ $relay.address | quote }} }
             - { name: UMBRA_PUBLIC_PORT, value: {{ $relay.port | quote }} }
             - { name: UMBRA_OPERATOR, value: {{ .Values.operator | quote }} }
-            - { name: UMBRA_CONTACT, value: {{ .Values.contact | quote }} }
             - { name: UMBRA_COUNTRY, value: {{ .Values.country | quote }} }
             - { name: UMBRA_ASN, value: {{ .Values.asn | quote }} }
             # 64 zeros: the relay declares no family (Part 10 REL-209).

@@ -36,10 +36,9 @@ relay:
   # net.ipv4.ip_unprivileged_port_start=443 on the node.
   port: 9443
 
-# The facts of the dossier (Part 10 §10.6), for the join request. With a
-# contact, the relay sends its join request to the network by itself.
+# Your name or the name of your group, for the join request (Part 10
+# §10.6). The relay sends its join request to the network by itself.
 operator: ""
-contact: ""
 # ISO 3166-1 alpha-2, as DE or US. Empty: the network states the country
 # of your provider. Set it when the node is in another country.
 country: ""

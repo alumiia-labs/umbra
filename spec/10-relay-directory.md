@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.60.2
+**Version:** 0.61.0
 **Date:** 2026-11-20
 
 ---
@@ -1799,7 +1799,6 @@ directory needs a signed operator dossier. That dossier holds these fields:
 - the family certificate
 - the hosting ASN
 - the jurisdiction of operation
-- a contact for abuse and for legal process
 
 **[REL-012]** Directory authorities MUST verify the dossier before the first
 listing. **[REL-013]** They MUST verify it again at a material change.

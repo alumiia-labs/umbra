@@ -47,8 +47,8 @@ a relay. An entry relay needs a certificate of a public authority: set
    ```
 
 2. Copy the settings file, and fill it in. Each line of `relay.env.example`
-   has its explanation. A middle relay needs three values: a name, your
-   operator name, and a contact address. The network tells the relay its
+   has its explanation. A middle relay needs two values: a name and your
+   operator name. The network tells the relay its
    address and the AS number of your provider.
 
    ```sh
